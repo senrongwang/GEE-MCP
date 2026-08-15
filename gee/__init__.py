@@ -5,6 +5,7 @@ from gee.dataset import DatasetInfo, DatasetResolver, DatasetType, DatasetNotFou
 from gee.boundary import BoundaryInfo, BoundaryResolver, BoundaryError
 from gee.export import ExportSpec, build_export_image, start_export
 from gee.task import TaskMonitor, describe_task, list_export_tasks
+from gee.validator import DatasetValidator
 
 __all__ = [
     "GeeSession",
@@ -24,4 +25,5 @@ __all__ = [
     "TaskMonitor",
     "describe_task",
     "list_export_tasks",
+    "DatasetValidator",
 ]

@@ -44,3 +44,20 @@ drive:
   temp_dir: "D:/GEE_Data/.tmp_drive"
   # 下载完成后是否删除 Drive 远端文件
   delete_remote_after_download: false
+
+catalog:
+  # GEE 数据集发现（Dataset Discovery）：
+  # 本地 Catalog 数据库（SQLite + FTS5）
+  db_path: "data/gee_catalog.db"
+  # 官方 GEE STAC Catalog 入口（gee_catalog_update 抓取源）
+  stac_catalog_url: "https://storage.googleapis.com/earthengine-stac/catalog/catalog.json"
+  # 并发抓取线程数
+  concurrency: 8
+  # 单次请求超时（秒）
+  request_timeout: 60
+  # 请求失败重试次数
+  retry: 3
+  # 数据集验证结果缓存 TTL（小时）
+  validation_cache_ttl_hours: 1
+  # Catalog 超过该天数未更新时搜索返回过期警告
+  stale_days: 60

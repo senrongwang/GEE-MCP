@@ -1,12 +1,18 @@
 """AI GEE Downloader —— 本地 MCP Server 入口（设计文档第 5、8 节）。
 
 工具：
-  gee_login            登录 GEE / 检查认证状态 / 初始化
-  gee_dataset_info     获取数据集信息（Image / ImageCollection / FeatureCollection）
-  gee_boundary_info    检查 Boundary Asset
-  gee_download         核心下载工具（dry_run 支持）
-  gee_task_status      查询任务状态
-  gee_list_tasks       列出当前用户的 Export Tasks / 本地任务
+  gee_login              登录 GEE / 检查认证状态 / 初始化
+  gee_dataset_info       获取数据集信息（Image / ImageCollection / FeatureCollection）
+  gee_boundary_info      检查 Boundary Asset
+  gee_search_datasets    搜索 GEE 数据集（本地 Catalog，无需登录）
+  gee_validate_dataset   用当前账号验证数据集（类型 / Band / 可访问性）
+  gee_catalog_update     更新本地 GEE 数据集 Catalog（官方 STAC 抓取）
+  gee_download           核心下载工具（dry_run 支持）
+  gee_task_status        查询任务状态
+  gee_list_tasks         列出当前用户的 Export Tasks / 本地任务
+
+Prompt：
+  gee_search             引导用户寻找 GEE 数据集
 
 运行：
   python server.py            （stdio 传输，供 Claude Desktop / Cursor / 其他 MCP 客户端注册）
@@ -36,6 +42,9 @@ mcp = MCPServer(
         "AI 原生的 Google Earth Engine（GEE）遥感数据下载工具："
         "系统自动判断 Image/ImageCollection、筛选时间、解析边界、规划下载策略"
         "（默认本地直下，必要时自动分片拼接，不经 Drive）、执行下载、检查 GeoTIFF、生成元数据。\n"
+        "【数据集发现】gee_search_datasets 在本地 Catalog 搜索官方 GEE 数据集"
+        "（无需登录；支持关键词 / Band / 分辨率 / 时间分辨率 / 时间范围 / 平台 / 区域 / 排序）；"
+        "候选结果用 gee_validate_dataset 验证（需先 gee_login），Catalog 过期可 gee_catalog_update 刷新。\n"
         "【gee_download 必选参数】dataset（数据集 ID）、start_date（YYYY-MM-DD）、"
         "end_date（YYYY-MM-DD）、boundary（Boundary Asset ID）。\n"
         "【可选参数】output（默认 D:/GEE_Data，建议显式指定）、scale（默认 1000m，支持 '1km'/'250m'）、"
@@ -60,6 +69,7 @@ _DOWNLOAD_REQUIRED_PARAMS = {
 # 全局单例
 _config: Optional[Config] = None
 _manager: Optional[DownloadManager] = None
+_catalog_db: Optional["CatalogDatabase"] = None
 
 
 def _get_config() -> Config:
@@ -74,6 +84,23 @@ def _get_manager() -> DownloadManager:
     if _manager is None:
         _manager = DownloadManager(_get_config())
     return _manager
+
+
+def _get_catalog_db() -> "CatalogDatabase":
+    """Catalog 数据库单例（GEE 数据集发现，无需登录）。"""
+    global _catalog_db
+    if _catalog_db is None:
+        from catalog.database import CatalogDatabase
+        _catalog_db = CatalogDatabase(_get_config().catalog_db_path)
+    return _catalog_db
+
+
+def _get_search_engine() -> "SearchEngine":
+    from catalog.search import SearchEngine
+    engine = SearchEngine()
+    engine.with_db(_get_catalog_db())
+    engine._stale_days = _get_config().catalog_stale_days  # noqa: SLF001
+    return engine
 
 
 # ---------------------------------------------------------------- 工具
@@ -112,6 +139,127 @@ def gee_dataset_info(dataset_id: str) -> dict:
                     "1. 检查数据集 ID 拼写。\n2. 到 GEE Data Catalog 确认 ID。\n3. 确认当前账号有权限访问。")
     except Exception as exc:  # noqa: BLE001
         return _err("dataset info failed", "获取数据集信息失败", str(exc), "确认已登录（gee_login）。")
+
+
+@mcp.tool()
+def gee_search_datasets(
+    query: Optional[str] = None,
+    dataset_type: Optional[str] = None,
+    bands: Optional[list[str]] = None,
+    spatial_resolution: Optional[float] = None,
+    resolution_tolerance: float = 2.0,
+    temporal_resolution: Optional[str] = None,
+    temporal_hard: bool = False,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    platform: Optional[str] = None,
+    sensor: Optional[str] = None,
+    provider: Optional[str] = None,
+    region: Optional[str] = None,
+    limit: int = 10,
+) -> dict:
+    """搜索 GEE 数据集（本地 Catalog，无需登录）。
+
+    搜索回答“官方目录里有哪些”，不调用 GEE API；验证请用 gee_validate_dataset。
+
+    Args:
+        query: 自然语言关键词，如 "EVI" / "soil moisture" / "land surface temperature"
+        dataset_type: 过滤类型：Image / ImageCollection / FeatureCollection
+        bands: 明确要求的 Band（强过滤，如 ["EVI"]）
+        spatial_resolution: 首选空间分辨率（米），如 1000；按接近度打分
+        resolution_tolerance: 分辨率匹配容差（log2 尺度，默认 2.0）
+        temporal_resolution: daily / 8-day / 16-day / monthly / annual
+        temporal_hard: True 时时间分辨率不满足直接排除（默认 False 只排序）
+        start_date / end_date: 请求时间范围 YYYY-MM-DD（区分完整/部分/无覆盖）
+        platform: 平台过滤，如 MODIS / Terra / Sentinel-2
+        sensor: 传感器过滤，如 MODIS / MSI
+        provider: 数据提供方过滤，如 NASA LP DAAC
+        region: 区域：global / China / Asia / Europe / North America
+        limit: 返回数量上限（1..100，默认 10）
+    """
+    try:
+        from models.search import SearchRequest
+        req = SearchRequest(
+            query=query,
+            dataset_type=dataset_type,
+            bands=bands,
+            spatial_resolution=spatial_resolution,
+            resolution_tolerance=resolution_tolerance,
+            temporal_resolution=temporal_resolution,
+            temporal_hard=temporal_hard,
+            start_date=start_date,
+            end_date=end_date,
+            platform=platform,
+            sensor=sensor,
+            provider=provider,
+            region=region,
+            limit=limit,
+        )
+        result = _get_search_engine().search(req)
+        out = result.to_dict()
+        # 无结果提示（设计文档第 27 节）：建议放宽条件
+        if out["total"] == 0 and out.get("catalog", {}).get("dataset_count", 0) > 0:
+            out["hint"] = (
+                "没有找到满足全部条件的数据集。建议放宽：时间分辨率 / 空间分辨率 / "
+                "时间范围 / 数据类型，或减少 bands 要求。"
+            )
+        return {"status": "ok", **out}
+    except Exception as exc:  # noqa: BLE001
+        return _err("search failed", "数据集搜索失败", str(exc),
+                    "1. 若 Catalog 为空，先调用 gee_catalog_update 收集目录。\n"
+                    "2. 检查参数格式（band / temporal_resolution / region / limit）。\n"
+                    "3. 可调用 gee_help(topic='search') 查看参数说明。")
+
+
+@mcp.tool()
+def gee_validate_dataset(dataset_id: str) -> dict:
+    """用当前 GEE 账号验证数据集：类型、真实 Band、可访问性（结果缓存 1 小时）。
+
+    Args:
+        dataset_id: GEE 数据集 ID，如 MODIS/061/MOD13Q1
+    """
+    try:
+        from gee.validator import DatasetValidator
+        validator = DatasetValidator(_get_config(), cache=_get_catalog_db())
+        result = validator.validate(dataset_id)
+        return {"status": "ok", **result}
+    except GeeAuthError as exc:
+        return _auth_err(exc)
+    except Exception as exc:  # noqa: BLE001
+        return _err("validate failed", "数据集验证失败", str(exc),
+                    "1. 确认已登录（gee_login）。\n2. 检查数据集 ID 拼写。")
+
+
+@mcp.tool()
+def gee_catalog_update(force: bool = False, limit: Optional[int] = None,
+                       seed: bool = False) -> dict:
+    """更新本地 GEE 数据集 Catalog（从官方 STAC 抓取，SQLite + FTS5）。
+
+    Args:
+        force: True 时全量重建（清空后重新收集）；False 时跳过当天已入库的数据集
+        limit: 最多收集的数据集数量（None=全部；首次体验可先小批量）
+        seed: True 时使用内置离线数据（不访问网络，用于演示 / 测试）
+    """
+    try:
+        from catalog.collector import CatalogCollector
+        collector = CatalogCollector(_get_catalog_db())
+        if seed:
+            stats = collector.collect_seed()
+        else:
+            stats = collector.collect(force=force, limit=limit)
+        return {"status": "ok", **stats}
+    except Exception as exc:  # noqa: BLE001
+        return _err("catalog update failed", "Catalog 更新失败", str(exc),
+                    "1. 检查网络 / 代理（GEE STAC 需要访问 Google）。\n"
+                    "2. 可先尝试 gee_catalog_update(seed=true) 用内置数据体验。\n"
+                    "3. 或 gee_catalog_update(limit=50) 小批量收集。")
+
+
+@mcp.prompt(name="gee_search", title="GEE Dataset Search",
+            description="引导用户寻找 Google Earth Engine 数据集")
+def _gee_search_prompt() -> str:
+    from prompts.search import get_search_prompt
+    return get_search_prompt()
 
 
 @mcp.tool()
@@ -157,6 +305,9 @@ def _HELP_DOC(topic: Optional[str] = None) -> dict:
             "gee_login": "登录 GEE / 检查认证状态 / 初始化（参数：force 可选）",
             "gee_dataset_info": "获取数据集信息（参数：dataset_id 必选）",
             "gee_boundary_info": "检查 Boundary Asset（参数：asset_id 必选）",
+            "gee_search_datasets": "搜索 GEE 数据集（本地 Catalog，无需登录；query/bands/分辨率/时间/平台/区域）",
+            "gee_validate_dataset": "用当前账号验证数据集（参数：dataset_id 必选）",
+            "gee_catalog_update": "更新本地数据集目录（参数：force/limit/seed 可选）",
             "gee_download": "核心下载（4 个必选参数 + 11 个可选参数）",
             "gee_task_status": "查询任务状态（参数：task_id 必选）",
             "gee_list_tasks": "列出本地任务 / GEE 任务（参数：state、source 可选）",
@@ -180,6 +331,21 @@ def _HELP_DOC(topic: Optional[str] = None) -> dict:
             "format": "输出格式（默认 GeoTIFF）",
             "description": "任务描述（默认自动生成）",
         },
+        "gee_search_datasets 参数": {
+            "query": "关键词，如 EVI / soil moisture / land surface temperature",
+            "bands": "明确要求的 Band（强过滤），如 [\"EVI\"]",
+            "dataset_type": "Image / ImageCollection / FeatureCollection",
+            "spatial_resolution": "首选分辨率（米），按接近度打分",
+            "resolution_tolerance": "分辨率匹配容差（log2 尺度，默认 2.0）",
+            "temporal_resolution": "daily / 8-day / 16-day / monthly / annual",
+            "temporal_hard": "true 时时间分辨率不满足直接排除",
+            "start_date / end_date": "请求时间范围 YYYY-MM-DD（区分完整/部分/无覆盖）",
+            "platform": "平台过滤，如 MODIS / Terra / Sentinel-2",
+            "sensor": "传感器过滤，如 MODIS / MSI",
+            "provider": "数据提供方过滤，如 NASA LP DAAC",
+            "region": "global / China / Asia / Europe / North America",
+            "limit": "返回数量上限（1..100，默认 10）",
+        },
         "调用流程": [
             "1. 首次使用先调用 gee_login（浏览器 OAuth，凭据持久化）",
             "2. gee_dataset_info 确认数据集类型（Image / ImageCollection）与波段",
@@ -187,6 +353,13 @@ def _HELP_DOC(topic: Optional[str] = None) -> dict:
             "4. 大规模下载先用 gee_download(dry_run=true) 预览：影像数 / 估算体积 / 策略 / 任务数，征询用户后再执行",
             "5. 提交后 gee_download 立即返回 task_id，用 gee_task_status 轮询",
             "6. 完成后返回本地文件路径、QA 报告与 metadata.json",
+        ],
+        "数据集发现流程": [
+            "1. gee_catalog_update 更新本地 Catalog（无需登录；大目录抓取需几分钟）",
+            "2. gee_search_datasets 搜索候选数据集（无需登录）",
+            "3. 比较候选：分辨率 / 时间频率 / 时间覆盖 / Band / Provider / match_reasons",
+            "4. gee_validate_dataset 用当前账号验证（需先 gee_login）",
+            "5. 确认后进入 gee_download",
         ],
         "示例": {
             "MODIS EVI 1km 单天": {
@@ -208,6 +381,16 @@ def _HELP_DOC(topic: Optional[str] = None) -> dict:
                 "aggregation": "mean",
                 "output": "D:/GEE_Data",
             },
+            "搜索 EVI 日尺度 1km": {
+                "query": "EVI",
+                "bands": ["EVI"],
+                "spatial_resolution": 1000,
+                "temporal_resolution": "daily",
+                "start_date": "2017-01-01",
+                "end_date": "2021-12-31",
+                "region": "China",
+                "limit": 10,
+            },
         },
     }
 
@@ -216,6 +399,21 @@ def _HELP_DOC(topic: Optional[str] = None) -> dict:
 
     if topic == "download":
         return {k: v for k, v in overview.items() if k != "工具清单"}
+    if topic == "search":
+        return {
+            "工具": overview["工具清单"]["gee_search_datasets"],
+            "gee_search_datasets 参数": overview["gee_search_datasets 参数"],
+            "数据集发现流程": overview["数据集发现流程"],
+            "提醒": "搜索基于本地 Catalog，可能滞后；验证 / 下载前用 gee_validate_dataset 确认。",
+        }
+    if topic in ("validate", "catalog_update"):
+        tool_name = {"validate": "gee_validate_dataset",
+                     "catalog_update": "gee_catalog_update"}[topic]
+        return {
+            "工具": overview["工具清单"][tool_name],
+            "数据集发现流程": overview["数据集发现流程"],
+            "提醒": "参数缺失或错误时，工具会返回『问题/原因/建议』结构，按建议处理即可。",
+        }
     if topic in ("login", "dataset_info", "boundary_info", "task_status", "list_tasks"):
         return {
             "工具": overview["工具清单"][f"gee_{topic}"],

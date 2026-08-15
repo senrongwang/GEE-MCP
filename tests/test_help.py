@@ -22,6 +22,26 @@ class TestHelpDoc:
         d = _HELP_DOC("download")
         assert "gee_download 必选参数" in d and "gee_download 可选参数" in d
 
+    def test_search_topic(self):
+        doc = _HELP_DOC("search")
+        assert doc["工具"]  # 非空
+        assert "数据集发现流程" in doc
+        assert "gee_search_datasets 参数" in doc
+
+    def test_validate_and_catalog_topics(self):
+        for topic in ("validate", "catalog_update"):
+            doc = _HELP_DOC(topic)
+            assert "工具" in doc
+            assert "数据集发现流程" in doc
+
+    def test_overview_contains_new_tools(self):
+        doc = _HELP_DOC()
+        tools = doc["工具清单"]
+        for name in ("gee_search_datasets", "gee_validate_dataset", "gee_catalog_update"):
+            assert name in tools
+        assert "gee_search_datasets 参数" in doc
+        assert "数据集发现流程" in doc
+
     def test_unknown_topic_returns_overview_with_warning(self):
         doc = _HELP_DOC("bogus")
         assert "警告" in doc

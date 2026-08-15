@@ -64,9 +64,46 @@ python -m earthengine authenticate
 | `gee_login` | 登录 / 检查认证状态 / 初始化 |
 | `gee_dataset_info` | 数据集信息（类型 / 波段 / CRS / 分辨率 / 时间范围） |
 | `gee_boundary_info` | Boundary Asset 检查（要素数 / 范围 / 面积） |
+| `gee_search_datasets` | **搜索 GEE 数据集**（本地 Catalog：关键词 / Band / 分辨率 / 时间分辨率 / 时间范围 / 平台 / 区域，无需登录） |
+| `gee_validate_dataset` | **验证数据集**（用当前账号：类型 / 真实 Band / 可访问性，结果缓存 1 小时） |
+| `gee_catalog_update` | **更新本地数据集目录**（官方 GEE STAC 抓取 → SQLite + FTS5；支持 `seed=true` 离线演示） |
 | `gee_download` | 核心下载（支持 `dry_run` 预览计划） |
 | `gee_task_status` | 查询本地任务状态 |
 | `gee_list_tasks` | 列出本地任务 / GEE Export Tasks |
+
+## GEE 数据集发现（Dataset Discovery）
+
+> 设计文档见 [AI_GEE_Dataset_Discovery_设计方案.md](./AI_GEE_Dataset_Discovery_设计方案.md)。
+
+用户可以直接说“帮我找 EVI 数据 / 找一个 2017-2021 年覆盖中国、日尺度、1km 左右的 EVI 数据”，系统自动完成 **搜索 → 筛选 → 比较 → 推荐 → 确认 → 下载** 闭环：
+
+```text
+gee_catalog_update         更新本地 Catalog（官方 STAC 抓取，无需登录）
+        ↓
+gee_search_datasets        搜索候选数据集（无需登录）
+        ↓                    关键词 / Band / 分辨率 / 时间频率 / 时间范围 / 平台 / 区域
+        ↓                    规则 Ranking + match_reasons
+gee_validate_dataset       用当前账号验证（需先 gee_login）
+        ↓
+gee_download               进入下载
+```
+
+### 首次使用
+
+```text
+1. gee_catalog_update            # 抓取全部官方数据集（约 1100+，几分钟；可先 limit=50 体验）
+2. gee_search_datasets(query="EVI", bands=["EVI"], spatial_resolution=1000,
+                       temporal_resolution="daily", start_date="2017-01-01",
+                       end_date="2021-12-31", region="China", limit=10)
+3. gee_validate_dataset("MODIS/061/MOD13A2")   # 确认类型 / Band / 可访问
+4. gee_download(...)                            # 进入下载
+```
+
+- **搜索不需要登录**；验证 / 下载需要 `gee_login`。
+- Catalog 存于 `data/gee_catalog.db`（SQLite + FTS5），搜索不访问 Google；怀疑过期时运行 `gee_catalog_update`。
+- 离线 / 演示：`gee_catalog_update(seed=true)` 用内置 13 个示例数据集（不访问网络）。
+- 空间分辨率按“接近度”打分（`1/(1+|log2(actual/preferred)|)`）；时间覆盖区分完整 / 部分 / 无覆盖；`bands` 参数是强过滤。
+- MCP 另注册了 `gee_search` Prompt，引导 AI 完成“解析需求 → 搜索 → 比较 → 推荐 → 验证 → 下载”。
 
 ### 注册到 MCP 客户端
 
@@ -136,15 +173,18 @@ gee_download(
 ## 项目结构
 
 ```text
-server.py             MCP Server 入口（6 个工具）
+server.py             MCP Server 入口（10 个工具 + gee_search prompt）
 config.py             配置加载
-config.yaml           配置文件（白名单 / 阈值 / 项目 ID）
-gee/                  GEE 封装：auth / dataset / collection / boundary / export / task
+config.yaml           配置文件（白名单 / 阈值 / 项目 ID / catalog 参数）
+catalog/              GEE 数据集发现：collector / normalizer / database / search / ranking / schema.sql / seed_data
+gee/                  GEE 封装：auth / dataset / collection / boundary / export / task / validator
 planner/              下载规划：size_estimator / temporal_planner / download_planner
 download/             下载引擎：direct / export / drive / manager
 raster/               GeoTIFF 检查：inspect / validate / metadata
-models/               数据模型：request / task / result
+models/               数据模型：request / task / result / dataset / search
+prompts/              MCP Prompt 内容：search（gee_search）
 utils/                工具：paths / logging / dates
+data/                 Catalog 数据库（data/gee_catalog.db，自动生成）
 tests/                单元测试
 ```
 
@@ -185,8 +225,9 @@ pytest -q          # 纯逻辑单元测试，无需 GEE 凭据
 
 ## Roadmap（见设计文档）
 
-- 第二阶段：月度/年度聚合、多波段输出、自动任务分批、Cloud Storage、断点续传、重试、下载缓存、数据集检索、边界/影像预览
-- 第三阶段：AI Remote Sensing Data Acquisition Agent（多源数据同网格预处理 + dataset manifest）
+- 已实现：数据集发现（`gee_search_datasets` / `gee_validate_dataset` / `gee_catalog_update` + `gee_search` prompt）
+- 第二阶段：月度/年度聚合、多波段输出、自动任务分批、Cloud Storage、断点续传、重试、下载缓存、数据集对比（`gee_compare_datasets`）、预览（`gee_preview_dataset`）
+- 第三阶段：语义搜索（Embedding + 向量库）、AI Remote Sensing Data Acquisition Agent（多源数据同网格预处理 + dataset manifest）
 
 ## License
 

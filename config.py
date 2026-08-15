@@ -20,6 +20,13 @@ _DEFAULTS: dict[str, Any] = {
     "logging": {"level": "INFO", "redact_secrets": True},
     "drive": {"temp_dir": "D:/GEE_Data/.tmp_drive",
               "delete_remote_after_download": False},
+    "catalog": {"db_path": "data/gee_catalog.db",
+                "stac_catalog_url": "https://storage.googleapis.com/earthengine-stac/catalog/catalog.json",
+                "concurrency": 8,
+                "request_timeout": 60,
+                "retry": 3,
+                "validation_cache_ttl_hours": 1,
+                "stale_days": 60},
 }
 
 
@@ -110,3 +117,38 @@ class Config:
     @property
     def drive_temp_dir(self) -> str:
         return str(self.data["drive"].get("temp_dir") or self.default_output)
+
+    # ---- Catalog（数据集发现，设计文档《GEE Dataset Discovery》） ----
+    @property
+    def catalog_db_path(self) -> str:
+        """Catalog SQLite 路径（相对路径按项目根目录解析）。"""
+        raw = str(self.data["catalog"].get("db_path") or "data/gee_catalog.db")
+        p = Path(raw)
+        if p.is_absolute():
+            return str(p)
+        return str(Path(__file__).parent / p)
+
+    @property
+    def catalog_stac_url(self) -> str:
+        return str(self.data["catalog"].get("stac_catalog_url")
+                   or "https://storage.googleapis.com/earthengine-stac/catalog/catalog.json")
+
+    @property
+    def catalog_concurrency(self) -> int:
+        return int(self.data["catalog"].get("concurrency") or 8)
+
+    @property
+    def catalog_request_timeout(self) -> int:
+        return int(self.data["catalog"].get("request_timeout") or 60)
+
+    @property
+    def catalog_retry(self) -> int:
+        return int(self.data["catalog"].get("retry") or 3)
+
+    @property
+    def catalog_validation_cache_ttl_hours(self) -> float:
+        return float(self.data["catalog"].get("validation_cache_ttl_hours") or 1)
+
+    @property
+    def catalog_stale_days(self) -> int:
+        return int(self.data["catalog"].get("stale_days") or 60)
