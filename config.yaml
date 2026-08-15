@@ -1,0 +1,46 @@
+# AI GEE Downloader 配置文件
+# 安全设计（第 37 节）：本地 MCP 必须限制 AI 能访问的本地路径。
+
+gee:
+  # Earth Engine 项目 ID（在 console.cloud.google.com 创建后填入）
+  project: "melodic-media-436902-v0"
+  # 认证超时（秒）
+  auth_timeout: 300
+
+download:
+  default_crs: "EPSG:3857"
+  default_format: "GeoTIFF"
+  # 导出任务允许的最大像素数
+  default_max_pixels: 10000000000000
+
+filesystem:
+  # 默认输出目录
+  default_output: "D:/GEE_Data"
+  # AI 允许写入的根目录白名单（必须显式列出）
+  allowed_roots:
+    - "D:/GEE_Data"
+
+planner:
+  # Direct Download 阈值（保守设置，不要卡在 GEE API 上限 32MB）
+  direct_download_max_mb: 30
+  # 最大 grid dimension（GEE 限制 10000，保守设置）
+  max_grid_dimension: 9000
+  # 本地直下分片数保护上限（默认永不自动 Export；分片超过此数时报错，请缩小范围）
+  max_direct_tiles: 1000
+  # 仅当用户显式 strategy="export" 时使用 Export Task（远程中转，默认不用）
+  export_force_threshold: 3
+
+network:
+  timeout: 300
+  retry: 3
+
+logging:
+  level: "INFO"
+  # 日志中禁止出现任何凭据 / token / 私密信息
+  redact_secrets: true
+
+drive:
+  # Google Drive 本地回传：临时下载目录
+  temp_dir: "D:/GEE_Data/.tmp_drive"
+  # 下载完成后是否删除 Drive 远端文件
+  delete_remote_after_download: false

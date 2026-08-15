@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-gee-downloader"
+version = "0.1.0"
+description = "AI 原生的 Google Earth Engine（GEE）遥感数据下载与任务管理工具（本地 MCP Server）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "AI GEE Downloader" }]
+keywords = ["gee", "earth-engine", "mcp", "remote-sensing", "geotiff"]
+
+dependencies = [
+    "earthengine-api>=0.1.390",
+    "mcp>=2.0.0",
+    "rasterio>=1.3",
+    "geopandas>=0.14",
+    "shapely>=2.0",
+    "pyproj>=3.6",
+    "requests>=2.31",
+    "httpx>=0.27",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# Google Drive 本地回传下载（GEE Export 结果从 Drive 拉回本地）
+drive = ["google-api-python-client>=2.120", "google-auth>=2.27"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+ai-gee-downloader = "server:main"
+
+[tool.setuptools.packages.find]
+include = ["gee*", "planner*", "download*", "raster*", "models*", "utils*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gee: 需要 GEE 凭据的集成测试（默认跳过）",
+]
