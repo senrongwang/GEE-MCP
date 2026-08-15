@@ -358,10 +358,11 @@ class DownloadManager:
         # 决定分组与聚合
         if mode in ("monthly", "annual"):
             aggregation = request.aggregation or "mean"
+            # iter_periods 的 period_end 是半开区间终点，直接传给 filterDate 即覆盖整段
             periods = list(iter_periods(request.date_start, request.date_end, mode))
             tasks = [(key, pstart, pend, aggregation, None) for key, pstart, pend in periods]
         else:
-            # native / daily：逐景（daily 可对当天聚合）
+            # native / daily：逐景（daily 对每天聚合）
             images = list_images(coll)
             fallback_image = None
             if not images:
@@ -377,17 +378,23 @@ class DownloadManager:
                     .first()
                 )
                 tasks = [(f"{request.start_date}_nearest", None, None, None, "_NEAREST_")]
-            elif len(images) > _MAX_NATIVE_TASKS:
-                raise DownloadError(
-                    f"逐景导出需要 {len(images)} 个任务，超过上限 {_MAX_NATIVE_TASKS}，"
-                    "请使用 time_mode=monthly/annual 或指定 aggregation 减少任务数"
-                )
             elif mode == "daily":
-                from datetime import date as _date
-                agg = request.aggregation or "mean"
-                tasks = [(it.date, _date.fromisoformat(it.date), _date.fromisoformat(it.date), agg, None)
-                         for it in images]
+                # daily：每天一个时间片。filterDate 是半开区间 [start, end)，
+                # 单日区间必须取 [day, day+1)，否则返回空集（原 bug：start == end
+                # 导致全部时间片被跳过、报「没有可堆叠的时间片输出」）。
+                # 按「有影像的日期」构造任务，同一天的多景合并为一个时间片，
+                # 避免键冲突与输出文件互相覆盖。
+                tasks = _daily_tasks(images, request.aggregation)
+                if len(tasks) > _MAX_NATIVE_TASKS:
+                    logger.warning(
+                        "daily 模式将输出 %d 个时间片（超过逐景上限 %d），"
+                        "请先用 dry_run 确认任务规模", len(tasks), _MAX_NATIVE_TASKS)
             else:
+                if len(images) > _MAX_NATIVE_TASKS:
+                    raise DownloadError(
+                        f"逐景导出需要 {len(images)} 个任务，超过上限 {_MAX_NATIVE_TASKS}，"
+                        "请使用 time_mode=monthly/annual 或指定 aggregation 减少任务数"
+                    )
                 # native：按 system:index 精确取景（filterDate 单日对 16 天合成数据会返回空集）
                 tasks = [(it.date, None, None, None, it.id) for it in images]
 
@@ -559,6 +566,21 @@ class DownloadManager:
 
     def _dataset_dir(self, request) -> Path:
         return Path(request.output) / safe_filename(request.dataset.replace("/", "_"))
+
+
+def _daily_tasks(images, aggregation) -> list[tuple]:
+    """daily 模式任务列表：每天一个 (key, pstart, pend, agg, None)。
+
+    pstart/pend 是 filterDate 半开区间 [day, day+1)，保证单日区间非空；
+    同一天的多景去重合并为一个时间片（键唯一，输出文件不互相覆盖）。
+    """
+    from datetime import date as _date, timedelta as _td
+    days = sorted({it.date for it in images if it.date})
+    agg = aggregation or "mean"
+    return [
+        (d, _date.fromisoformat(d), _date.fromisoformat(d) + _td(days=1), agg, None)
+        for d in days
+    ]
 
 
 def _region_area(region: ee.Geometry) -> float:

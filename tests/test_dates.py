@@ -65,15 +65,35 @@ class TestDates:
 
     def test_iter_daily(self):
         from datetime import date
-        keys = [k for k, _, _ in iter_periods(date(2021, 1, 1), date(2021, 1, 3), "daily")]
-        assert keys == ["2021-01-01", "2021-01-02", "2021-01-03"]
+        periods = list(iter_periods(date(2021, 1, 1), date(2021, 1, 3), "daily"))
+        assert [k for k, _, _ in periods] == ["2021-01-01", "2021-01-02", "2021-01-03"]
+        # period_end 必须是半开区间终点 [day, day+1)，否则 filterDate 单日返回空集
+        assert [(s, e) for _, s, e in periods] == [
+            (date(2021, 1, 1), date(2021, 1, 2)),
+            (date(2021, 1, 2), date(2021, 1, 3)),
+            (date(2021, 1, 3), date(2021, 1, 4)),
+        ]
+
+    def test_iter_daily_native_same_bounds(self):
+        from datetime import date
+        assert list(iter_periods(date(2021, 1, 1), date(2021, 1, 1), "native")) == [
+            ("2021-01-01", date(2021, 1, 1), date(2021, 1, 2))
+        ]
 
     def test_iter_monthly(self):
         from datetime import date
         keys = [k for k, _, _ in iter_periods(date(2021, 11, 15), date(2022, 1, 10), "monthly")]
         assert keys == ["2021-11", "2021-12", "2022-01"]
+        # 半开区间终点：下月初；覆盖整月（含月末最后一天）
+        assert list(iter_periods(date(2021, 1, 1), date(2021, 1, 31), "monthly")) == [
+            ("2021-01", date(2021, 1, 1), date(2021, 2, 1))
+        ]
 
     def test_iter_annual(self):
         from datetime import date
         keys = [k for k, _, _ in iter_periods(date(2017, 1, 1), date(2021, 12, 31), "annual")]
         assert keys == [str(y) for y in range(2017, 2022)]
+        # 半开区间终点：下年初；覆盖整年（含 12-31）
+        assert list(iter_periods(date(2021, 1, 1), date(2021, 12, 31), "annual")) == [
+            ("2021", date(2021, 1, 1), date(2022, 1, 1))
+        ]

@@ -39,20 +39,18 @@ def build_collection(
 ) -> ee.ImageCollection:
     """构造按时间（和可选边界）筛选后的 ImageCollection。
 
-    单日请求（start == end）会扩展为 [start, start+1) 半开区间，
-    避免 GEE 对空日期范围报错。
+    GEE 的 filterDate 是半开区间 [start, end)，会把 end 当天排除；
+    这里把 end 统一向后扩展一天，保证 [start, end] 闭区间（含 end 当天）
+    内的影像全部入选（单日请求 start == end 也自然成立）。
     """
     try:
         coll = ee.ImageCollection(dataset_id)
     except Exception as exc:  # noqa: BLE001
         raise CollectionError(f"无法构造 ImageCollection {dataset_id}: {exc}") from exc
-    if start_date == end_date:
-        from datetime import datetime, timedelta
-        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        end_effective = (start_dt + timedelta(days=1)).strftime("%Y-%m-%d")
-        coll = coll.filterDate(start_date, end_effective)
-    else:
-        coll = coll.filterDate(start_date, end_date)
+    from datetime import datetime, timedelta
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    end_effective = (datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    coll = coll.filterDate(start_dt.strftime("%Y-%m-%d"), end_effective)
     if boundary is not None:
         coll = coll.filterBounds(boundary)
     # 时间升序，便于后续按序导出

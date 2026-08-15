@@ -91,6 +91,56 @@ class TestManagerNoGEE:
         assert manager.list_tasks() == []
 
 
+class TestDailyTasks:
+    """_daily_tasks：daily 模式任务构造（半开区间 + 键去重，不依赖 GEE）。
+
+    回归：filterDate 是半开区间 [start, end)，单日区间必须取 [day, day+1)，
+    否则 start == end 返回空集，所有时间片被跳过。
+    """
+
+    def test_half_open_interval(self):
+        from datetime import date
+        from download.manager import _daily_tasks
+        from gee.collection import ImageItem
+        images = [ImageItem(id="a", date="2021-01-01")]
+        tasks = _daily_tasks(images, None)
+        assert tasks == [("2021-01-01", date(2021, 1, 1), date(2021, 1, 2), "mean", None)]
+
+    def test_dedup_same_day(self):
+        from datetime import timedelta
+        from download.manager import _daily_tasks
+        from gee.collection import ImageItem
+        images = [
+            ImageItem(id="a", date="2021-01-01"),
+            ImageItem(id="b", date="2021-01-01"),
+            ImageItem(id="c", date="2021-01-02"),
+        ]
+        tasks = _daily_tasks(images, "median")
+        assert [t[0] for t in tasks] == ["2021-01-01", "2021-01-02"]
+        assert [t[3] for t in tasks] == ["median", "median"]
+        for key, pstart, pend, _, _ in tasks:
+            assert pend - pstart == timedelta(days=1)
+            assert pstart.isoformat() == key
+
+    def test_many_days_not_capped_by_helper(self):
+        """daily 模式允许超过逐景上限的天数（上限拦截属于执行层策略，helper 不截断）。"""
+        from download.manager import _daily_tasks
+        from gee.collection import ImageItem
+        images = [ImageItem(id=str(i), date=f"2021-{i:02d}-01") for i in range(1, 13)]
+        assert len(_daily_tasks(images, None)) == 12
+
+    def test_empty_dates_ignored(self):
+        from download.manager import _daily_tasks
+        from gee.collection import ImageItem
+        images = [ImageItem(id="a", date=""), ImageItem(id="b", date="2021-01-01")]
+        tasks = _daily_tasks(images, None)
+        assert [t[0] for t in tasks] == ["2021-01-01"]
+
+    def test_empty(self):
+        from download.manager import _daily_tasks
+        assert _daily_tasks([], None) == []
+
+
 class TestStackPeriodOutputs:
     """_stack_period_outputs：多时间片合并为一个多波段 tif（不依赖 GEE）。"""
 

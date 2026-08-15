@@ -91,12 +91,20 @@ def period_key(d: date, mode: str) -> str:
 
 
 def iter_periods(start: date, end: date, mode: str) -> Iterator[tuple[str, date, date]]:
-    """迭代 [start, end] 按模式切分出的时间段，返回 (key, period_start, period_end)。"""
+    """迭代 [start, end] 按模式切分出的时间段，返回 (key, period_start, period_end)。
+
+    period_end 是 GEE filterDate 半开区间 [period_start, period_end) 的终点（不含该日），
+    直接传给 filterDate 即可覆盖整个时间段（含 end 当天）：
+
+    - daily / native -> [day, day+1)
+    - monthly        -> [月初, 下月初)
+    - annual         -> [年初, 下年初)
+    """
     mode = mode.lower()
     if mode in ("native", "daily"):
         cur = start
         while cur <= end:
-            yield cur.isoformat(), cur, cur
+            yield cur.isoformat(), cur, cur + _DAY
             cur += _DAY
         return
     if mode == "monthly":
@@ -104,14 +112,14 @@ def iter_periods(start: date, end: date, mode: str) -> Iterator[tuple[str, date,
         while cur <= end:
             nxt = (cur.replace(year=cur.year + 1, month=1) if cur.month == 12
                    else cur.replace(month=cur.month + 1))
-            yield f"{cur.year:04d}-{cur.month:02d}", cur, min(nxt - _DAY, end)
+            yield f"{cur.year:04d}-{cur.month:02d}", cur, nxt
             cur = nxt
         return
     if mode == "annual":
         cur = start.replace(month=1, day=1)
         while cur <= end:
             nxt = cur.replace(year=cur.year + 1)
-            yield f"{cur.year:04d}", cur, min(nxt - _DAY, end)
+            yield f"{cur.year:04d}", cur, nxt
             cur = nxt
         return
     raise ValueError(f"未知时间模式: {mode!r}（支持 native/daily/monthly/annual）")
