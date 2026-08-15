@@ -18,6 +18,7 @@ from typing import Optional
 
 import ee
 import httpx
+import numpy as np
 import rasterio
 from rasterio.merge import merge as rio_merge
 
@@ -174,6 +175,62 @@ def _stack_bands(band_files: list[Path], out_path: Path) -> Path:
                            nodata=srcs[0].nodata) as dst:
             for i, src in enumerate(srcs, start=1):
                 dst.write(src.read(1), i)
+        return out
+    finally:
+        for s in srcs:
+            s.close()
+
+
+def stack_period_files(
+    period_files: list[Path],
+    out_path: str | Path,
+    band_labels: Optional[list[str]] = None,
+) -> Path:
+    """把多个时间片的 GeoTIFF 堆叠为一个多波段 GeoTIFF（时间维->波段维）。
+
+    每个输入文件（一个时间片）的全部波段按顺序写入输出：
+    波段顺序 = 时间片顺序 × 每片波段顺序（如 2 天各 1 波段 -> 2 波段）。
+    要求所有时间片网格一致（同 CRS / transform / 尺寸），否则抛错。
+    """
+    files = [Path(f) for f in period_files]
+    if len(files) == 1:
+        shutil.move(str(files[0]), str(out_path))
+        return Path(out_path)
+    srcs = [rasterio.open(str(f)) for f in files]
+    try:
+        first = srcs[0]
+        for s in srcs[1:]:
+            if (s.width, s.height) != (first.width, first.height) \
+                    or s.crs != first.crs or s.transform != first.transform:
+                raise DirectDownloadError(
+                    "时间片网格不一致（CRS/transform/尺寸），无法堆叠为多波段 tif；"
+                    "请确认各时间片使用相同的 region/scale/crs，或改用聚合模式")
+        # 统一 dtype：全部一致则保留，否则提升为 float32
+        dtypes = {d for s in srcs for d in s.dtypes}
+        dtype = next(iter(dtypes)) if len(dtypes) == 1 else "float32"
+        total_bands = sum(s.count for s in srcs)
+
+        out = Path(out_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with rasterio.open(str(out), "w",
+                           driver="GTiff",
+                           height=first.height,
+                           width=first.width,
+                           count=total_bands,
+                           dtype=dtype,
+                           crs=first.crs,
+                           transform=first.transform,
+                           nodata=first.nodata) as dst:
+            band_i = 1
+            for src in srcs:
+                for b in range(1, src.count + 1):
+                    data = src.read(b)
+                    if data.dtype != dtype:
+                        data = data.astype(dtype)
+                    dst.write(data, band_i)
+                    if band_labels and band_i <= len(band_labels):
+                        dst.set_band_description(band_i, str(band_labels[band_i - 1]))
+                    band_i += 1
         return out
     finally:
         for s in srcs:

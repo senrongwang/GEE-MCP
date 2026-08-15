@@ -40,6 +40,9 @@ class DownloadRequest:
     clip: bool = False
     # 只下载指定波段（如 ["EVI"]）；不填则下载全部波段
     bands: Optional[list[str]] = None
+    # 时间维堆叠：把多个时间片合并为一个多波段 GeoTIFF（波段数=时间片数，每波段=一个时间片）
+    # 默认 False：每个时间片单独输出一个文件（如 ndvi01.tif、ndvi02.tif）
+    stack_periods: bool = False
     # 下载策略：auto=由 Download Planner 决定
     strategy: str = "auto"
     dry_run: bool = False
@@ -133,6 +136,7 @@ class DownloadRequest:
             "aggregation": self.aggregation,
             "clip": self.clip,
             "bands": self.bands,
+            "stack_periods": self.stack_periods,
             "strategy": self.strategy,
             "dry_run": self.dry_run,
             "grid_mode": self.grid_mode,

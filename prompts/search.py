@@ -23,7 +23,13 @@ SEARCH_PROMPT = """你可以帮助用户寻找 Google Earth Engine（GEE）数�
 4. 给出推荐及理由（参考返回的 match_reasons）。
 5. 如果用户选择数据集，调用 gee_validate_dataset 用当前账号验证
    （类型 / Band 是否真实存在 / 能否访问）。
-6. 如果用户要求下载，再进入 gee_download。
+6. 如果用户要求下载，进入 gee_download 前先询问输出方式：
+   - 默认：单波段，每个时间片单独一个文件（如 ndvi01.tif、ndvi02.tif）；
+   - 或：多波段合并为一个 tif（stack_periods=true，如 ndvi01-02.tif，
+     波段数=时间片数，每个波段对应一天/一月，适合小 tif 合并）；
+   - 提示用户：大 tif 建议单波段，小 tif 可合并。
+7. 大规模下载先 gee_download(dry_run=true) 预览（影像数 / 体积 / 策略 / 任务数），
+   征询用户后再执行。
 
 注意事项：
 - 搜索结果来自本地 Catalog（SQLite），可能滞后；如怀疑过期，先运行 gee_catalog_update。

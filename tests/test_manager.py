@@ -89,3 +89,99 @@ class TestManagerNoGEE:
         cfg.data["filesystem"]["default_output"] = str(tmp_path)
         manager = DownloadManager(cfg)
         assert manager.list_tasks() == []
+
+
+class TestStackPeriodOutputs:
+    """_stack_period_outputs：多时间片合并为一个多波段 tif（不依赖 GEE）。"""
+
+    def _manager(self, tmp_path):
+        from download.manager import DownloadManager
+        cfg = Config.load()
+        cfg.data["filesystem"]["default_output"] = str(tmp_path)
+        return DownloadManager(cfg)
+
+    def _tif(self, path, value):
+        import numpy as np
+        import rasterio
+        from rasterio.transform import from_origin
+        arr = np.full((1, 10, 10), value, dtype=np.float32)
+        with rasterio.open(
+            str(path), "w", driver="GTiff",
+            height=10, width=10, count=1, dtype="float32",
+            crs="EPSG:3857", transform=from_origin(0, 100000, 1000, 1000),
+        ) as dst:
+            dst.write(arr)
+        return path
+
+    def test_stack_two_periods(self, tmp_path):
+        manager = self._manager(tmp_path)
+        dataset_dir = tmp_path / "MODIS_061_MOD13Q1"
+        p1 = self._tif(tmp_path / "raw1.tif", 1.0)
+        p2 = self._tif(tmp_path / "raw2.tif", 2.0)
+        req = DownloadRequest(
+            dataset="MODIS/061/MOD13Q1",
+            start_date="2021-01-01",
+            end_date="2021-01-02",
+            boundary="projects/x/assets/CUS",
+            output=str(tmp_path),
+            stack_periods=True,
+        ).validate()
+        out = manager._stack_period_outputs(
+            record=None, request=req,
+            plan={"bands": ["NDVI"]},
+            period_outputs=[
+                {"path": str(p1), "period": "2021-01-01"},
+                {"path": str(p2), "period": "2021-01-02"},
+            ],
+            dataset_dir=dataset_dir,
+            stack_tmp=tmp_path / "stack_tmp",
+        )
+        assert len(out) == 1
+        assert out[0]["stacked"] is True
+        assert out[0]["stacked_band_count"] == 2
+        import rasterio
+        with rasterio.open(out[0]["path"]) as ds:
+            assert ds.count == 2
+            assert ds.descriptions[0] == "NDVI_2021-01-01"
+            assert ds.descriptions[1] == "NDVI_2021-01-02"
+
+    def test_stack_single_period_fallback(self, tmp_path):
+        manager = self._manager(tmp_path)
+        dataset_dir = tmp_path / "MODIS_061_MOD13Q1"
+        p1 = self._tif(tmp_path / "raw1.tif", 1.0)
+        req = DownloadRequest(
+            dataset="MODIS/061/MOD13Q1",
+            start_date="2021-01-01",
+            end_date="2021-01-01",
+            boundary="projects/x/assets/CUS",
+            output=str(tmp_path),
+            stack_periods=True,
+        ).validate()
+        out = manager._stack_period_outputs(
+            record=None, request=req,
+            plan={"bands": ["NDVI"]},
+            period_outputs=[{"path": str(p1), "period": "2021-01-01"}],
+            dataset_dir=dataset_dir,
+            stack_tmp=tmp_path / "stack_tmp",
+        )
+        assert len(out) == 1
+        assert "stacked" not in out[0]  # 退化：单文件直接改名
+
+    def test_stack_empty_raises(self, tmp_path):
+        manager = self._manager(tmp_path)
+        req = DownloadRequest(
+            dataset="MODIS/061/MOD13Q1",
+            start_date="2021-01-01",
+            end_date="2021-01-02",
+            boundary="projects/x/assets/CUS",
+            output=str(tmp_path),
+            stack_periods=True,
+        ).validate()
+        with pytest.raises(Exception):
+            manager._stack_period_outputs(
+                record=None, request=req,
+                plan={"bands": ["NDVI"]},
+                period_outputs=[],
+                dataset_dir=tmp_path / "x",
+                stack_tmp=None,
+            )

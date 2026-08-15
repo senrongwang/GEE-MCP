@@ -206,10 +206,12 @@ tests/                单元测试
 ```text
 time_mode:  native | daily | monthly | annual
 aggregation: mean | median | mosaic | first | best | min | max | sum
+stack_periods: false（默认，每时间片一个文件） | true（多时间片合并为一个多波段 tif）
 ```
 
 - `native` + 影像较少 → 逐景下载（本地直下）；
 - 影像较多 → 自动按月 / 按年分组（可配合 `aggregation=mean` 等输出 12 个月平均 / 5 个年文件），避免大量逐景请求。
+- `stack_periods=true`：时间维堆叠——把多个时间片合并为一个多波段 GeoTIFF（波段数=时间片数，每个波段对应一天/一月），文件名如 `2021-01-01-2021-12-31.tif`，波段描述 = `{波段名}_{时间片}`。适合小 tif 合并；大 tif 建议保持默认单波段逐文件。
 
 ## 安全设计
 
@@ -225,8 +227,8 @@ pytest -q          # 纯逻辑单元测试，无需 GEE 凭据
 
 ## Roadmap（见设计文档）
 
-- 已实现：数据集发现（`gee_search_datasets` / `gee_validate_dataset` / `gee_catalog_update` + `gee_search` prompt）
-- 第二阶段：月度/年度聚合、多波段输出、自动任务分批、Cloud Storage、断点续传、重试、下载缓存、数据集对比（`gee_compare_datasets`）、预览（`gee_preview_dataset`）
+- 已实现：数据集发现（`gee_search_datasets` / `gee_validate_dataset` / `gee_catalog_update` + `gee_search` prompt）、时间维堆叠（`stack_periods=true` 多波段合并）
+- 第二阶段：月度/年度聚合、自动任务分批、Cloud Storage、断点续传、重试、下载缓存、数据集对比（`gee_compare_datasets`）、预览（`gee_preview_dataset`）
 - 第三阶段：语义搜索（Embedding + 向量库）、AI Remote Sensing Data Acquisition Agent（多源数据同网格预处理 + dataset manifest）
 
 ## License

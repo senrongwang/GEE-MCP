@@ -17,7 +17,11 @@ from typing import Optional
 import ee
 
 from config import Config
-from download.direct import DirectDownloadError, direct_download_image
+from download.direct import (
+    DirectDownloadError,
+    direct_download_image,
+    stack_period_files,
+)
 from download.drive import DriveDownloader, DriveDownloadError, drive_web_url
 from download.export import run_export_to_drive
 from gee.auth import ensure_initialized
@@ -133,6 +137,7 @@ class DownloadManager:
             "aggregation": request.aggregation,
             "aggregation_effective": effective_agg,
             "fallback_nearest": fallback,
+            "stack_periods": request.stack_periods,
             "estimated_mb": round(est.mb_total, 2),
             "estimated_gb": round(est.mb_total / 1024, 3),
             "estimated_pixels": est.pixel_count,
@@ -145,6 +150,13 @@ class DownloadManager:
                           else (len(dsinfo.bands) or 1),
             "dataset_info": dsinfo.to_dict(),
         }
+        if request.stack_periods:
+            # 堆叠后：输出 1 个多波段 tif，波段数 = 时间片数 × 每片波段数
+            periods = self._estimate_tasks(temporal, request, mode)
+            plan["output_files"] = 1 if periods > 1 else periods
+            plan["stacked_band_count"] = periods * (plan["band_count"] or 1)
+        else:
+            plan["output_files"] = self._estimate_tasks(temporal, request, mode)
         if dsinfo.time_start:
             plan["dataset_time_range"] = [dsinfo.time_start, dsinfo.time_end]
         return plan
@@ -262,11 +274,12 @@ class DownloadManager:
             record.transition("VALIDATING_OUTPUT")
             self.store.save(record)
             qa_files = []
-            for f in files:
+            for o in outputs:
                 report = validate_file(
-                    f,
+                    o["path"],
                     expected_crs=request.crs,
                     expected_scale=request.scale_m,
+                    expected_bands=o.get("stacked_band_count"),
                 )
                 qa_files.append(report.to_dict())
             record.files = qa_files
@@ -310,7 +323,11 @@ class DownloadManager:
             self.store.save(record)
 
     def _execute_periods(self, record, request, plan, strategy, mode):
-        """按时间片输出 GeoTIFF。返回 [{"path": ..., "period": ...}, ...]"""
+        """按时间片输出 GeoTIFF。返回 [{"path": ..., "period": ...}, ...]
+
+        stack_periods=True 时：先把各时间片下载到临时目录，
+        再合并为一个多波段 GeoTIFF（波段数=时间片数，每波段=一个时间片）。
+        """
         session = ensure_initialized(self.config)
         resolver = DatasetResolver()
         dsinfo = resolver.inspect(request.dataset)
@@ -377,6 +394,13 @@ class DownloadManager:
         record.transition("RUNNING")
         self.store.save(record)
 
+        stacking = bool(request.stack_periods) and len(tasks) > 1
+        import tempfile
+        stack_tmp = None
+        if stacking:
+            stack_tmp = Path(tempfile.mkdtemp(prefix="gee_stack_"))
+
+        period_outputs: list[dict] = []
         for i, (key, pstart, pend, agg, img_id) in enumerate(tasks):
             if img_id == "_NEAREST_":
                 image = fallback_image
@@ -390,6 +414,16 @@ class DownloadManager:
                 # native：按 system:index 精确取景
                 image = coll.filter(ee.Filter.eq("system:index", img_id)).first()
 
+            if stacking:
+                # 堆叠模式：先下载到临时目录，最后合并
+                path = stack_tmp / f"{i:04d}_{safe_filename(key)}.tif"
+                out = self._download_one(
+                    record, request, strategy, image, region, path,
+                    f"{request.description}_{key}", i,
+                )
+                period_outputs.append({"path": str(out), "period": key})
+                continue
+
             year = key[:4]
             sub = make_output_dir(
                 request.output, safe_filename(request.dataset.replace("/", "_")),
@@ -401,7 +435,58 @@ class DownloadManager:
             )
             outputs.append({"path": str(out), "period": key})
 
+        if stacking:
+            outputs = self._stack_period_outputs(
+                record, request, plan, period_outputs, dataset_dir, stack_tmp)
+
         return outputs
+
+    # ================= 内部：时间维堆叠 =================
+    def _stack_period_outputs(self, record, request, plan, period_outputs,
+                              dataset_dir: Path, stack_tmp: Optional[Path]) -> list[dict]:
+        """把多个时间片合并为一个多波段 GeoTIFF（波段数=时间片数）。
+
+        输出文件名：{首时间片}-{末时间片}.tif（如 2021-01-01-2021-01-02.tif），
+        每波段描述 = {波段名}_{时间片}。
+        """
+        import shutil
+        if not period_outputs:
+            raise DownloadError("没有可堆叠的时间片输出")
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        band_names: list[str] = plan.get("bands") or []
+        labels: list[str] = []
+        for po in period_outputs:
+            key = po["period"]
+            if band_names:
+                labels.extend(f"{b}_{key}" for b in band_names)
+            else:
+                labels.append(key)
+
+        if len(period_outputs) == 1:
+            # 只有一个时间片：直接改名即可（退化为单波段单文件）
+            src = Path(period_outputs[0]["path"])
+            final = dataset_dir / f"{safe_filename(period_outputs[0]['period'])}.tif"
+            shutil.move(str(src), str(final))
+            if stack_tmp:
+                shutil.rmtree(stack_tmp, ignore_errors=True)
+            return [{"path": str(final), "period": period_outputs[0]["period"]}]
+
+        first_key = period_outputs[0]["period"]
+        last_key = period_outputs[-1]["period"]
+        final = dataset_dir / f"{safe_filename(first_key)}-{safe_filename(last_key)}.tif"
+        stacked = stack_period_files(
+            [Path(po["path"]) for po in period_outputs],
+            final,
+            band_labels=labels,
+        )
+        if stack_tmp:
+            shutil.rmtree(stack_tmp, ignore_errors=True)
+        return [{
+            "path": str(stacked),
+            "period": f"{first_key}..{last_key}",
+            "stacked": True,
+            "stacked_band_count": len(labels),
+        }]
 
     def _download_one(self, record, request, strategy, image, region, path, description, idx):
         """按策略下载单个影像，失败则抛错（任务转 FAILED）。"""

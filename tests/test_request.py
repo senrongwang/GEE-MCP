@@ -67,3 +67,18 @@ class TestRequestValidation:
     def test_auto_description(self):
         r = _req().validate()
         assert "MODIS_061_MOD13Q1" in r.description
+
+    def test_stack_periods_default_false(self):
+        r = _req().validate()
+        assert r.stack_periods is False
+
+    def test_stack_periods_true(self):
+        r = _req(stack_periods=True).validate()
+        assert r.stack_periods is True
+        plain = r.to_plain()
+        assert plain["stack_periods"] is True
+
+    def test_stack_periods_in_plain(self):
+        plain = _req().validate().to_plain()
+        assert "stack_periods" in plain
+        assert plain["stack_periods"] is False

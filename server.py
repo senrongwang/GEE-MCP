@@ -323,6 +323,7 @@ def _HELP_DOC(topic: Optional[str] = None) -> dict:
             "scale": "分辨率（默认 1000m；支持 '250m'/'1km'/'9000'）",
             "crs": "坐标系（默认 EPSG:3857）",
             "bands": "只下载指定波段，如 [\"EVI\"]（默认全部）",
+            "stack_periods": "时间维堆叠：多个时间片合并为一个多波段 tif（波段数=时间片数，每波段=一天/一月）；默认 False=每时间片单独文件",
             "time_mode": "native(逐景)/daily/monthly/annual（默认 native）",
             "aggregation": "mean/median/mosaic/first/best/min/max/sum（monthly/annual 默认 mean）",
             "clip": "是否裁剪到边界像元（默认 False，仅作 region 约束）",
@@ -350,9 +351,11 @@ def _HELP_DOC(topic: Optional[str] = None) -> dict:
             "1. 首次使用先调用 gee_login（浏览器 OAuth，凭据持久化）",
             "2. gee_dataset_info 确认数据集类型（Image / ImageCollection）与波段",
             "3. gee_boundary_info 确认边界资产可访问",
-            "4. 大规模下载先用 gee_download(dry_run=true) 预览：影像数 / 估算体积 / 策略 / 任务数，征询用户后再执行",
-            "5. 提交后 gee_download 立即返回 task_id，用 gee_task_status 轮询",
-            "6. 完成后返回本地文件路径、QA 报告与 metadata.json",
+            "4. 下载前询问用户输出方式：默认单波段（每个时间片单独文件，如 ndvi01.tif、ndvi02.tif）；"
+            "若用户要多波段合并，用 stack_periods=true 合并为一个多波段 tif（如 ndvi01-02.tif，波段数=时间片数）",
+            "5. 大规模下载先用 gee_download(dry_run=true) 预览：影像数 / 估算体积 / 策略 / 任务数，征询用户后再执行",
+            "6. 提交后 gee_download 立即返回 task_id，用 gee_task_status 轮询",
+            "7. 完成后返回本地文件路径、QA 报告与 metadata.json",
         ],
         "数据集发现流程": [
             "1. gee_catalog_update 更新本地 Catalog（无需登录；大目录抓取需几分钟）",
@@ -440,6 +443,7 @@ def gee_download(
     aggregation: Optional[str] = None,
     clip: bool = False,
     bands: Optional[list[str]] = None,
+    stack_periods: bool = False,
     strategy: str = "auto",
     dry_run: bool = False,
     description: str = "",
@@ -459,6 +463,9 @@ def gee_download(
         aggregation: 每个时间片内的聚合：mean/median/mosaic/first/best/min/max/sum
         clip: 是否裁剪到边界像元（默认 False，仅作 region 约束）
         bands: 只下载指定波段，如 ["EVI"]；不填则全部波段
+        stack_periods: 时间维堆叠：把多个时间片合并为一个多波段 GeoTIFF
+            （波段数=时间片数，每波段=一个时间片，如 ndvi01-02.tif）；
+            默认 False：每个时间片单独输出一个文件（ndvi01.tif、ndvi02.tif）
         strategy: auto（自动选择）/ direct / export
         dry_run: 只做规划并返回估算，不执行下载（大数据量必须先用 dry_run）
         description: 任务描述（默认自动生成）
@@ -479,6 +486,7 @@ def gee_download(
         aggregation=aggregation,
         clip=clip,
         bands=bands,
+        stack_periods=stack_periods,
         strategy=strategy,
         dry_run=dry_run,
         description=description,

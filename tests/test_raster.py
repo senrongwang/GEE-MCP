@@ -81,3 +81,61 @@ class TestMetadata:
         assert meta["files"][0]["bands"] == 2
         assert "download_time" in meta
         assert "plan" in meta
+
+
+def _make_single_band_tif(path, value, transform=None, nodata=-9999.0):
+    """生成 10x10 EPSG:3857 单波段 GeoTIFF。"""
+    arr = np.full((1, 10, 10), value, dtype=np.float32)
+    with rasterio.open(
+        str(path), "w",
+        driver="GTiff",
+        height=10, width=10, count=1,
+        dtype="float32",
+        crs="EPSG:3857",
+        transform=transform or from_origin(0, 100000, 1000, 1000),
+        nodata=nodata,
+    ) as dst:
+        dst.write(arr)
+    return path
+
+
+class TestStackPeriodFiles:
+    """时间维堆叠：多时间片 -> 一个多波段 GeoTIFF。"""
+
+    def test_stack_two_periods(self, tmp_path):
+        from download.direct import DirectDownloadError, stack_period_files
+        d1 = _make_single_band_tif(tmp_path / "2021-01-01.tif", 1.0)
+        d2 = _make_single_band_tif(tmp_path / "2021-01-02.tif", 2.0)
+        out = stack_period_files(
+            [d1, d2], tmp_path / "2021-01-01-2021-01-02.tif",
+            band_labels=["NDVI_2021-01-01", "NDVI_2021-01-02"],
+        )
+        assert out.exists()
+        with rasterio.open(str(out)) as ds:
+            assert ds.count == 2
+            assert ds.height == 10 and ds.width == 10
+            assert ds.crs == "EPSG:3857"
+            assert ds.descriptions[0] == "NDVI_2021-01-01"
+            assert ds.descriptions[1] == "NDVI_2021-01-02"
+            b1 = ds.read(1)
+            b2 = ds.read(2)
+            assert float(b1[0, 0]) == 1.0
+            assert float(b2[0, 0]) == 2.0
+
+    def test_stack_single_period_moves(self, tmp_path):
+        from download.direct import stack_period_files
+        d1 = _make_single_band_tif(tmp_path / "2021-01-01.tif", 1.0)
+        out = stack_period_files([d1], tmp_path / "out.tif")
+        assert out.exists()
+        with rasterio.open(str(out)) as ds:
+            assert ds.count == 1
+
+    def test_stack_mismatched_grid_raises(self, tmp_path):
+        from download.direct import DirectDownloadError, stack_period_files
+        d1 = _make_single_band_tif(tmp_path / "a.tif", 1.0)
+        d2 = _make_single_band_tif(
+            tmp_path / "b.tif", 2.0,
+            transform=from_origin(500, 100500, 1000, 1000),  # 网格偏移
+        )
+        with pytest.raises(DirectDownloadError):
+            stack_period_files([d1, d2], tmp_path / "bad.tif")
