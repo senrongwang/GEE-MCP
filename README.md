@@ -5,6 +5,9 @@ AI 原生的 **Google Earth Engine（GEE）遥感数据下载与任务管理工�
 用户只需告诉 AI：数据集 ID、时间范围、分辨率、Boundary Asset、输出目录、坐标系 —— 系统自动完成登录检查、数据集识别、时间筛选、边界解析、下载策略规划（默认本地直下，必要时自动分片）、执行下载、GeoTIFF QA 与元数据生成。
 
 > 设计文档见 [AI_GEE_下载器整体设计方案.md](./AI_GEE_下载器整体设计方案.md)。
+>
+> 🧭 **想直接让 AI 帮你下载数据？** 复制 [GEE_MCP_Prompt_Template.md](./GEE_MCP_Prompt_Template.md)
+> 里的用户提示词模板，填上你的需求（数据 / 时间 / 区域 / 分辨率 / 输出目录）发给 AI 即可，全程无需接触代码。
 
 ## 架构
 
@@ -150,6 +153,9 @@ Claude Desktop `claude_desktop_config.json`：
 
 ## 典型交互
 
+> 直接可用的用户提示词模板见 [GEE_MCP_Prompt_Template.md](./GEE_MCP_Prompt_Template.md)
+> （标准下载 / 长时间序列 / 单景快照 / 让 AI 推荐数据集，四种场景照抄填空即可）。
+
 > 用户：下载 MODIS NDVI，2021 年全年，1 km，使用我的安徽边界资产，EPSG:3857，保存到 D:\GEE_Data。
 
 AI 调用：
@@ -173,19 +179,20 @@ gee_download(
 ## 项目结构
 
 ```text
-server.py             MCP Server 入口（10 个工具 + gee_search prompt）
-config.py             配置加载
-config.yaml           配置文件（白名单 / 阈值 / 项目 ID / catalog 参数）
-catalog/              GEE 数据集发现：collector / normalizer / database / search / ranking / schema.sql / seed_data
-gee/                  GEE 封装：auth / dataset / collection / boundary / export / task / validator
-planner/              下载规划：size_estimator / temporal_planner / download_planner
-download/             下载引擎：direct / export / drive / manager
-raster/               GeoTIFF 检查：inspect / validate / metadata
-models/               数据模型：request / task / result / dataset / search
-prompts/              MCP Prompt 内容：search（gee_search）
-utils/                工具：paths / logging / dates
-data/                 Catalog 数据库（data/gee_catalog.db，自动生成）
-tests/                单元测试
+server.py                  MCP Server 入口（10 个工具 + gee_search prompt）
+GEE_MCP_Prompt_Template.md 用户提示词模板（照抄填空即可让 AI 帮你下载）
+config.py                  配置加载
+config.yaml                配置文件（白名单 / 阈值 / 项目 ID / catalog 参数）
+catalog/                   GEE 数据集发现：collector / normalizer / database / search / ranking / schema.sql / seed_data
+gee/                       GEE 封装：auth / dataset / collection / boundary / export / task / validator
+planner/                   下载规划：size_estimator / temporal_planner / download_planner
+download/                  下载引擎：direct / export / drive / manager
+raster/                    GeoTIFF 检查：inspect / validate / metadata
+models/                    数据模型：request / task / result / dataset / search
+prompts/                   MCP Prompt 内容：search（gee_search）
+utils/                     工具：paths / logging / dates
+data/                      Catalog 数据库（data/gee_catalog.db，自动生成）
+tests/                     单元测试
 ```
 
 ## 下载策略（本地优先，默认永不远程导出）
