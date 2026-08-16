@@ -19,6 +19,7 @@ import ee
 from config import Config
 from download.direct import (
     DirectDownloadError,
+    convert_output_dtype,
     direct_download_image,
     stack_period_files,
 )
@@ -33,7 +34,7 @@ from models.request import DownloadRequest
 from models.result import DownloadResult
 from models.task import TaskRecord, TaskStore
 from planner.download_planner import DownloadPlanner, STRATEGY_DIRECT, STRATEGY_EXPORT
-from planner.size_estimator import estimate_raster_size
+from planner.size_estimator import estimate_raster_size_grid
 from planner.temporal_planner import TemporalPlanner
 from raster.metadata import write_metadata
 from raster.validate import validate_file
@@ -96,33 +97,75 @@ class DownloadManager:
         temporal = TemporalPlanner().plan(
             images, request.date_start, request.date_end, request.aggregation)
 
-        # 分片规划：估算外包矩形在目标网格下的直接下载分片数（本地优先策略依据）
+        # 分片规划：估算外包矩形在目标网格下的直接下载分片数（本地优先策略依据）。
+        # P0-1：分片上限按 float64 字节预算反推，与 GEE 实际请求大小一致。
         from download.direct import plan_chunks
         try:
-            tile_count = len(plan_chunks(region, request.scale_m, request.crs))
+            tile_count = len(plan_chunks(
+                region, request.scale_m, request.crs,
+                max_request_bytes=self.config.max_direct_request_bytes))
         except Exception:  # noqa: BLE001
             tile_count = 1
 
+        band_count = max(1, len(request.bands) if request.bands
+                         else (len(dsinfo.bands) or 1))
+        # P0-2：按目标 CRS 下的实际网格估算（不再用 geodesic 球面面积），
+        # 且按 GEE 返回的 float64 计字节，保证 dry_run 与实际一致。
+        est = estimate_raster_size_grid(
+            region, request.scale_m, band_count, dtype="FLOAT64", crs=request.crs)
+
+        # P0-3：统一决策链 —— planner 的规模判定不再被 manager 静默否决。
+        # planner 给出「按规模该用哪种策略」的建议，manager 决定实际策略（本地优先），
+        # 两者不一致时在 dry_run 明确警告，绝不静默执行必败路径。
+        prec = self.planner.plan(
+            region, request.scale_m, band_count, dtype="FLOAT64",
+            image_count=count, forced=request.strategy, crs=request.crs)
+        strategy_effective, strat_info = self._decide_strategy(
+            request, count, tile_count, est.mb_total, est.grid_dimension)
+
+        warnings: list[str] = []
+        if strategy_effective == STRATEGY_DIRECT and strat_info.get("feasible") is False:
+            warnings.append(
+                "该任务 direct 本地直下必失败：" + strat_info["reason"] +
+                "。请二选一：① 缩小空间范围 / 提高分辨率（减少分片与网格）；"
+                "② 显式 strategy=\"export\"（远程中转，先检查 Google Drive 空间）。"
+            )
+        elif prec.strategy == STRATEGY_EXPORT and strategy_effective == STRATEGY_DIRECT:
+            warnings.append(
+                f"Planner 按规模建议 Export（{prec.reason}），但默认策略为本地直下："
+                f"将分片下载（约 {tile_count} 片），耗时更长且受 GEE 请求配额限制；"
+                "如需远程中转请显式 strategy=\"export\"。"
+            )
+
         # 保护：分片数超过上限时报错（避免大量 getDownloadURL 请求触发 GEE 配额）。
         # 默认永不自动 Export；如确实需要远程中转，请显式 strategy="export"。
+        # dry_run 只警告不报错（P0-3），真实提交才 fail-fast。
         max_tiles = self.config.max_direct_tiles
-        if strategy_forced_export(request) is False and tile_count > max_tiles:
+        if (tile_count > max_tiles and strategy_effective == STRATEGY_DIRECT
+                and not request.dry_run):
             raise DownloadError(
                 f"该任务需 {tile_count} 个分片，超过本地直下保护上限 {max_tiles}，"
                 "请缩小空间范围 / 提高分辨率，或显式指定 strategy=\"export\"（远程中转）。"
             )
 
-        area = _region_area(region)
-        band_count = max(1, len(request.bands) if request.bands
-                         else (len(dsinfo.bands) or 1))
-        est = estimate_raster_size(area, request.scale_m, band_count)
-
-        strategy = self._decide_strategy(
-            request, count, tile_count, est.mb_total, est.grid_dimension)
         mode = self._effective_time_mode(request, temporal.strategy, count)
         effective_agg = None
         if mode in ("monthly", "annual", "daily"):
             effective_agg = request.aggregation or "mean"
+
+        output_files = self._estimate_tasks(temporal, request, mode)
+
+        # P2-8：用户意图 vs 推荐 的差异提示
+        if temporal.recommendation and temporal.strategy != mode and mode != "native":
+            warnings.append(
+                f"时间规划器建议「{temporal.recommendation}」，但用户指定 "
+                f"time_mode={request.time_mode}，实际将输出 {output_files} 个文件。"
+            )
+        if request.dtype not in ("auto",) and request.dtype:
+            warnings.append(
+                f"输出 dtype 将转换为 {request.dtype}（GEE 原始返回 float64，"
+                "转换后体积更小，估算体积按 float64 计）。"
+            )
 
         plan = {
             "dataset": request.dataset,
@@ -134,6 +177,7 @@ class DownloadManager:
             "resolution_m": request.scale_m,
             "crs": request.crs,
             "time_mode": mode,
+            "time_mode_user": request.time_mode,
             "aggregation": request.aggregation,
             "aggregation_effective": effective_agg,
             "fallback_nearest": fallback,
@@ -141,7 +185,12 @@ class DownloadManager:
             "estimated_mb": round(est.mb_total, 2),
             "estimated_gb": round(est.mb_total / 1024, 3),
             "estimated_pixels": est.pixel_count,
-            "recommended_strategy": strategy,
+            "strategy_recommended": prec.strategy,
+            "strategy_reason": prec.reason,
+            "recommended_strategy": strategy_effective,
+            "direct_feasible": bool(strat_info.get("feasible", True)),
+            "direct_infeasible_reason": strat_info.get("reason"),
+            "warnings": warnings,
             "estimated_tasks": self._estimate_tasks(temporal, request, mode),
             "tile_count": tile_count,
             "temporal_recommendation": temporal.recommendation,
@@ -150,13 +199,19 @@ class DownloadManager:
                           else (len(dsinfo.bands) or 1),
             "dataset_info": dsinfo.to_dict(),
         }
+        if request.dtype not in ("auto",) and request.dtype:
+            est_out = estimate_raster_size_grid(
+                region, request.scale_m, band_count,
+                dtype=request.dtype, crs=request.crs)
+            plan["estimated_mb_after_dtype"] = round(est_out.mb_total, 2)
+            plan["dtype"] = request.dtype
         if request.stack_periods:
             # 堆叠后：输出 1 个多波段 tif，波段数 = 时间片数 × 每片波段数
             periods = self._estimate_tasks(temporal, request, mode)
             plan["output_files"] = 1 if periods > 1 else periods
             plan["stacked_band_count"] = periods * (plan["band_count"] or 1)
         else:
-            plan["output_files"] = self._estimate_tasks(temporal, request, mode)
+            plan["output_files"] = output_files
         if dsinfo.time_start:
             plan["dataset_time_range"] = [dsinfo.time_start, dsinfo.time_end]
         return plan
@@ -219,15 +274,35 @@ class DownloadManager:
         return out
 
     # ================= 内部：决策 =================
-    def _decide_strategy(self, request, image_count, tile_count, est_mb, grid_dim) -> str:
-        """本地优先策略（默认永不远程导出）：
+    def _decide_strategy(self, request, image_count, tile_count, est_mb, grid_dim) -> tuple[str, dict]:
+        """本地优先策略（默认永不自动 Export，设计文档第 28 节）。
 
-        - 默认（auto / direct）-> 始终 Direct Download 本地直下（自动分片拼接），不经 Drive
-        - 仅当用户显式指定 strategy="export" 时才使用 Export Task（远程中转，默认不用）
+        返回 (strategy, info)：info 含 feasible / reason，供 dry_run 展示
+        「direct 是否必失败」及失败原因（P0-3：统一决策链，不再静默执行必败路径）。
+        - auto / direct -> Direct Download 本地直下（自动分片拼接），不经 Drive；
+          当网格维度或分片数超过保护上限时 feasible=False（提交时 fail-fast）。
+        - 仅当用户显式指定 strategy="export" 时才使用 Export Task（远程中转）。
         """
         if request.strategy == "export":
-            return STRATEGY_EXPORT
-        return STRATEGY_DIRECT
+            return STRATEGY_EXPORT, {"feasible": True, "reason": "用户显式指定 Export Task"}
+
+        issues: list[str] = []
+        if grid_dim > self.config.max_grid_dimension:
+            issues.append(
+                f"网格维度 {grid_dim} > 上限 {self.config.max_grid_dimension}"
+                "（GEE 单请求限制 10000）")
+        if tile_count > self.config.max_direct_tiles:
+            issues.append(
+                f"分片数 {tile_count} > 本地直下保护上限 {self.config.max_direct_tiles}")
+        if issues:
+            return STRATEGY_DIRECT, {
+                "feasible": False,
+                "reason": "；".join(issues),
+            }
+        return STRATEGY_DIRECT, {
+            "feasible": True,
+            "reason": f"估算 {est_mb:.1f} MB / 网格 {grid_dim} / {tile_count} 片，在安全阈值内",
+        }
 
     def _effective_time_mode(self, request, temporal_strategy, count) -> str:
         if request.time_mode != "native":
@@ -270,6 +345,13 @@ class DownloadManager:
             outputs = self._execute_periods(record, request, plan, strategy, mode)
             files = [o["path"] for o in outputs]
 
+            # P2-10：输出 dtype 转换（GEE 返回 float64，转 float32/Int16 + deflate 可大幅减体积）
+            if request.dtype not in ("auto",) and request.dtype:
+                self._set_progress(record, 0.98, f"转换输出 dtype 为 {request.dtype}")
+                for o in outputs:
+                    o["path"] = str(convert_output_dtype(o["path"], request.dtype))
+                files = [o["path"] for o in outputs]
+
             # QA
             record.transition("VALIDATING_OUTPUT")
             self.store.save(record)
@@ -280,6 +362,7 @@ class DownloadManager:
                     expected_crs=request.crs,
                     expected_scale=request.scale_m,
                     expected_bands=o.get("stacked_band_count"),
+                    min_valid_fraction=self.config.qa_min_valid_fraction,
                 )
                 qa_files.append(report.to_dict())
             record.files = qa_files
@@ -407,6 +490,11 @@ class DownloadManager:
         if stacking:
             stack_tmp = Path(tempfile.mkdtemp(prefix="gee_stack_"))
 
+        # P2-7：进度 = 下载阶段 0→0.9 + 堆叠阶段 0.9→1.0
+        total_tasks = len(tasks)
+        est_bytes = int(float(plan.get("estimated_mb") or 0) * 1024 * 1024)
+        direct_feasible = bool(plan.get("direct_feasible", True))
+
         period_outputs: list[dict] = []
         for i, (key, pstart, pend, agg, img_id) in enumerate(tasks):
             if img_id == "_NEAREST_":
@@ -424,9 +512,13 @@ class DownloadManager:
             if stacking:
                 # 堆叠模式：先下载到临时目录，最后合并
                 path = stack_tmp / f"{i:04d}_{safe_filename(key)}.tif"
+                self._set_progress(
+                    record, 0.9 * (i / max(1, total_tasks)),
+                    f"下载 {i + 1}/{total_tasks} 个时间片（{key}）")
                 out = self._download_one(
                     record, request, strategy, image, region, path,
-                    f"{request.description}_{key}", i,
+                    f"{request.description}_{key}", i, est_bytes=est_bytes,
+                    direct_feasible=direct_feasible,
                 )
                 period_outputs.append({"path": str(out), "period": key})
                 continue
@@ -437,8 +529,12 @@ class DownloadManager:
                 year, allowed_roots=self.config.allowed_roots,
             )
             path = sub / f"{safe_filename(key)}.tif"
+            self._set_progress(
+                record, 0.9 * (i / max(1, total_tasks)),
+                f"下载 {i + 1}/{total_tasks} 个时间片（{key}）")
             out = self._download_one(
                 record, request, strategy, image, region, path, f"{request.description}_{key}", i,
+                est_bytes=est_bytes, direct_feasible=direct_feasible,
             )
             outputs.append({"path": str(out), "period": key})
 
@@ -481,10 +577,16 @@ class DownloadManager:
         first_key = period_outputs[0]["period"]
         last_key = period_outputs[-1]["period"]
         final = dataset_dir / f"{safe_filename(first_key)}-{safe_filename(last_key)}.tif"
+
+        # P2-7：大文件堆叠的进度（0.9 → 1.0）
+        def _stack_progress(frac, msg):
+            self._set_progress(record, 0.9 + 0.1 * frac, msg)
+
         stacked = stack_period_files(
             [Path(po["path"]) for po in period_outputs],
             final,
             band_labels=labels,
+            progress_cb=_stack_progress,
         )
         if stack_tmp:
             shutil.rmtree(stack_tmp, ignore_errors=True)
@@ -495,7 +597,8 @@ class DownloadManager:
             "stacked_band_count": len(labels),
         }]
 
-    def _download_one(self, record, request, strategy, image, region, path, description, idx):
+    def _download_one(self, record, request, strategy, image, region, path, description, idx,
+                      est_bytes: Optional[int] = None, direct_feasible: bool = True):
         """按策略下载单个影像，失败则抛错（任务转 FAILED）。"""
         if strategy == STRATEGY_DIRECT:
             record.transition("DOWNLOADING")
@@ -506,9 +609,47 @@ class DownloadManager:
                 crs=request.crs,
                 config=self.config,
                 bands=request.bands,
+                max_request_bytes=self.config.max_direct_request_bytes,
+                grid_mode=request.grid_mode,
+                progress_cb=lambda frac, msg: self._set_progress(
+                    record, 0.9 * frac, msg),
             )
 
-        # Export Task
+        # Export Task：前置检查 Google Drive 空间 / 可用性（P2-9）。
+        # 不足或不可用时：direct 可行则自动回退本地直下，否则明确报错。
+        driver = DriveDownloader()
+        try:
+            quota = driver.quota()
+        except DriveDownloadError as exc:
+            if direct_feasible:
+                logger.warning("Drive 不可用（%s），回退本地直下", exc)
+                record.progress_note = "Drive 不可用，自动回退本地直下"
+                self.store.save(record)
+                return self._download_one(
+                    record, request, STRATEGY_DIRECT, image, region, path,
+                    description, idx, est_bytes=est_bytes,
+                    direct_feasible=direct_feasible)
+            raise DownloadError(
+                f"Export 需要 Google Drive 回传但 Drive 不可用: {exc}。"
+                "请检查授权（gee_login 时勾选 Drive 权限），或改用 strategy=\"direct\"。"
+            ) from exc
+        if est_bytes and quota["remaining"] < est_bytes:
+            if direct_feasible:
+                logger.warning(
+                    "Drive 空间不足（剩余 %.0f MB < 需要 %.0f MB），回退本地直下",
+                    quota["remaining"] / (1024 * 1024), est_bytes / (1024 * 1024))
+                record.progress_note = "Drive 空间不足，自动回退本地直下"
+                self.store.save(record)
+                return self._download_one(
+                    record, request, STRATEGY_DIRECT, image, region, path,
+                    description, idx, est_bytes=est_bytes,
+                    direct_feasible=direct_feasible)
+            raise DownloadError(
+                f"Google Drive 空间不足（剩余 {quota['remaining'] / (1024 * 1024):.0f} MB，"
+                f"需约 {est_bytes / (1024 * 1024):.0f} MB）。"
+                "请清理 Drive 空间后重试，或改用 strategy=\"direct\" 本地直下。"
+            )
+
         spec = ExportSpec(
             description=description,
             scale=request.scale_m,
@@ -535,9 +676,13 @@ class DownloadManager:
         self.store.save(record)
 
         if outcome.state != "COMPLETED":
+            err = outcome.error_message or ""
+            hint = ""
+            if "space" in err.lower() or "quota" in err.lower():
+                hint = "（可能原因：Google Drive 空间不足或配额超限，请清理 Drive 后重试）"
             raise DownloadError(
                 f"Earth Engine export 失败: {outcome.description} state={outcome.state} "
-                f"err={outcome.error_message}"
+                f"err={outcome.error_message}{hint}"
             )
 
         # 从 Drive 回传本地
@@ -567,6 +712,15 @@ class DownloadManager:
     def _dataset_dir(self, request) -> Path:
         return Path(request.output) / safe_filename(request.dataset.replace("/", "_"))
 
+    def _set_progress(self, record, frac, note: Optional[str] = None) -> None:
+        """写入任务进度（0~1）与进度说明；record 可能为 None（测试直调）。"""
+        if record is None:
+            return
+        record.progress = round(max(0.0, min(1.0, float(frac))), 4)
+        if note:
+            record.progress_note = note
+        self.store.save(record)
+
 
 def _daily_tasks(images, aggregation) -> list[tuple]:
     """daily 模式任务列表：每天一个 (key, pstart, pend, agg, None)。
@@ -581,15 +735,3 @@ def _daily_tasks(images, aggregation) -> list[tuple]:
         (d, _date.fromisoformat(d), _date.fromisoformat(d) + _td(days=1), agg, None)
         for d in days
     ]
-
-
-def _region_area(region: ee.Geometry) -> float:
-    try:
-        return float(region.area(1).getInfo())
-    except Exception:  # noqa: BLE001
-        return 0.0
-
-
-def strategy_forced_export(request) -> bool:
-    """是否用户显式要求 Export（远程中转）。"""
-    return (request.strategy or "auto").lower() == "export"

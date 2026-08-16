@@ -16,6 +16,27 @@ AGGREGATIONS = ("mean", "median", "mosaic", "first", "best", "min", "max", "sum"
 FORMATS = ("GeoTIFF", "TFRecord", "Numpy")
 # 合法下载策略
 STRATEGIES = ("auto", "direct", "export")
+# 输出 dtype（P2-10）：auto=保留 GEE 原始 float64；其余为 rasterio dtype 名
+OUTPUT_DTYPES = ("auto", "float32", "float64", "int8", "uint8", "int16", "uint16",
+                 "int32", "uint32")
+# dtype 别名 -> 规范化名
+_DTYPE_ALIASES = {
+    "auto": "auto",
+    "float": "float32", "single": "float32", "f4": "float32", "float32": "float32",
+    "double": "float64", "f8": "float64", "float64": "float64",
+    "byte": "uint8", "u1": "uint8", "uint8": "uint8",
+    "int8": "int8", "i1": "int8",
+    "short": "int16", "i2": "int16", "int16": "int16",
+    "ushort": "uint16", "u2": "uint16", "uint16": "uint16",
+    "int": "int32", "i4": "int32", "int32": "int32",
+    "u4": "uint32", "uint32": "uint32",
+}
+
+
+def normalize_dtype(raw: Optional[str]) -> str:
+    """规范化 dtype（别名转标准名），非法值返回 "auto" 并提示。"""
+    key = (raw or "auto").strip().lower()
+    return _DTYPE_ALIASES.get(key, "auto")
 
 
 class RequestValidationError(ValueError):
@@ -45,10 +66,14 @@ class DownloadRequest:
     stack_periods: bool = False
     # 下载策略：auto=由 Download Planner 决定
     strategy: str = "auto"
+    # 输出 dtype（P2-10）：auto=保留 GEE 原始 float64；
+    # 指定 float32/int16/... 时下载后转换（+deflate 压缩），可大幅减小体积
+    dtype: str = "auto"
     dry_run: bool = False
     description: str = ""
-    # 网格对齐（设计文档第 16 节，第二阶段能力，预留字段）
-    grid_mode: str = "target_crs"
+    # 网格对齐（设计文档第 16 节）：aligned=把 GEE 返回的分块重采样到
+    # 期望对齐网格后再拼接（P1-4，默认开启，避免分块网格与请求矩形不一致导致拼接错位）
+    grid_mode: str = "aligned"
     crs_transform: Optional[list] = None
 
     date_start: date = field(default=None, init=False, repr=False)  # type: ignore[assignment]
@@ -108,6 +133,14 @@ class DownloadRequest:
             )
         self.strategy = strategy
 
+        # P2-10：输出 dtype（别名归一化，非法值报错）
+        norm_dtype = normalize_dtype(self.dtype)
+        if norm_dtype == "auto" and str(self.dtype or "auto").strip().lower() != "auto":
+            raise RequestValidationError(
+                f"dtype 必须是 {OUTPUT_DTYPES} 之一，收到: {self.dtype!r}"
+            )
+        self.dtype = norm_dtype
+
         if not self.output.strip():
             raise RequestValidationError("output（输出目录）不能为空")
         if self.grid_mode not in ("native", "target_crs", "aligned"):
@@ -138,6 +171,7 @@ class DownloadRequest:
             "bands": self.bands,
             "stack_periods": self.stack_periods,
             "strategy": self.strategy,
+            "dtype": self.dtype,
             "dry_run": self.dry_run,
             "grid_mode": self.grid_mode,
         }

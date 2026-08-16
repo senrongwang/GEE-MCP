@@ -50,7 +50,7 @@ mcp = MCPServer(
         "【可选参数】output（默认 D:/GEE_Data，建议显式指定）、scale（默认 1000m，支持 '1km'/'250m'）、"
         "crs（默认 EPSG:3857）、bands（如 [\"EVI\"]，默认全部）、time_mode（native/daily/monthly/annual）、"
         "aggregation（mean/median/mosaic/first/best/min/max/sum）、dry_run（大任务必须先用 true 预览）、"
-        "strategy（auto=本地直下）、clip、description。\n"
+        "strategy（auto=本地直下）、dtype（float32/int16 等，缩小体积）、clip、description。\n"
         "【调用流程】1) 首次先 gee_login；2) 用 gee_dataset_info 确认数据集与波段；"
         "3) 用 gee_boundary_info 确认边界；4) 大规模下载先 gee_download(dry_run=true) 征询用户；"
         "5) 提交后用 gee_task_status 轮询，gee_list_tasks 查看历史。\n"
@@ -308,7 +308,7 @@ def _HELP_DOC(topic: Optional[str] = None) -> dict:
             "gee_search_datasets": "搜索 GEE 数据集（本地 Catalog，无需登录；query/bands/分辨率/时间/平台/区域）",
             "gee_validate_dataset": "用当前账号验证数据集（参数：dataset_id 必选）",
             "gee_catalog_update": "更新本地数据集目录（参数：force/limit/seed 可选）",
-            "gee_download": "核心下载（4 个必选参数 + 11 个可选参数）",
+            "gee_download": "核心下载（4 个必选参数 + 13 个可选参数）",
             "gee_task_status": "查询任务状态（参数：task_id 必选）",
             "gee_list_tasks": "列出本地任务 / GEE 任务（参数：state、source 可选）",
         },
@@ -328,6 +328,7 @@ def _HELP_DOC(topic: Optional[str] = None) -> dict:
             "aggregation": "mean/median/mosaic/first/best/min/max/sum（monthly/annual 默认 mean）",
             "clip": "是否裁剪到边界像元（默认 False，仅作 region 约束）",
             "strategy": "auto=本地直下（默认）/ direct / export",
+            "dtype": "输出 dtype：auto=保留 GEE 原始 float64；指定 float32/int16/uint16/... 时下载后转换（deflate 压缩），体积可减小数倍",
             "dry_run": "只规划不下载（默认 False；大规模数据必须先用 true）",
             "format": "输出格式（默认 GeoTIFF）",
             "description": "任务描述（默认自动生成）",
@@ -445,6 +446,7 @@ def gee_download(
     bands: Optional[list[str]] = None,
     stack_periods: bool = False,
     strategy: str = "auto",
+    dtype: str = "auto",
     dry_run: bool = False,
     description: str = "",
 ) -> dict:
@@ -467,6 +469,9 @@ def gee_download(
             （波段数=时间片数，每波段=一个时间片，如 ndvi01-02.tif）；
             默认 False：每个时间片单独输出一个文件（ndvi01.tif、ndvi02.tif）
         strategy: auto（自动选择）/ direct / export
+        dtype: 输出 dtype：auto=保留 GEE 原始 float64；
+            指定 float32/int16/uint16/... 时下载后转换（deflate 压缩），
+            体积可减小数倍（如 float64->float32 约减半）
         dry_run: 只做规划并返回估算，不执行下载（大数据量必须先用 dry_run）
         description: 任务描述（默认自动生成）
 
@@ -488,6 +493,7 @@ def gee_download(
         bands=bands,
         stack_periods=stack_periods,
         strategy=strategy,
+        dtype=dtype,
         dry_run=dry_run,
         description=description,
     )

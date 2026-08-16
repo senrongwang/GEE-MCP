@@ -109,6 +109,26 @@ class DriveDownloader:
         except Exception as exc:  # noqa: BLE001
             raise DriveDownloadError(f"查询 Drive 文件失败: {exc}") from exc
 
+    def quota(self) -> dict:
+        """查询 Google Drive 存储配额（P2-9：export 前置检查空间）。
+
+        返回 {"limit": 总空间, "usage": 已用, "remaining": 剩余}（字节）。
+        """
+        self._ensure_service()
+        if not self._available:
+            raise DriveDownloadError(self._error or "Drive 不可用")
+        try:
+            q = self._service.about().get(fields="storageQuota").execute()
+            limit = int(q.get("limit") or 0)
+            usage = int(q.get("usageInDrive") or int(q.get("usage") or 0))
+            return {
+                "limit": limit,
+                "usage": usage,
+                "remaining": max(0, limit - usage),
+            }
+        except Exception as exc:  # noqa: BLE001
+            raise DriveDownloadError(f"查询 Drive 配额失败: {exc}") from exc
+
     def download(self, file_id: str, out_path: str | Path) -> Path:
         """下载 Drive 文件到本地路径。"""
         self._ensure_service()

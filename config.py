@@ -15,7 +15,9 @@ _DEFAULTS: dict[str, Any] = {
                  "default_max_pixels": 10_000_000_000_000},
     "filesystem": {"default_output": "D:/GEE_Data", "allowed_roots": ["D:/GEE_Data"]},
     "planner": {"direct_download_max_mb": 20, "max_grid_dimension": 9000,
-                "export_force_threshold": 3, "max_direct_tiles": 1000},
+                "export_force_threshold": 3, "max_direct_tiles": 1000,
+                "max_direct_request_bytes": 44 * 1024 * 1024},
+    "qa": {"min_valid_fraction": 0.01},
     "network": {"timeout": 300, "retry": 3},
     "logging": {"level": "INFO", "redact_secrets": True},
     "drive": {"temp_dir": "D:/GEE_Data/.tmp_drive",
@@ -105,6 +107,20 @@ class Config:
     def max_direct_tiles(self) -> int:
         """本地直下分片数保护上限（超过报错，避免 GEE 请求配额被打爆）。"""
         return int(self.data["planner"].get("max_direct_tiles") or 1000)
+
+    @property
+    def max_direct_request_bytes(self) -> int:
+        """单次 getDownloadURL 请求字节预算（P0-1，按 float64 8B/px 反推分块像素）。
+
+        GEE 实际上限 50331648 字节（48MiB），默认保守取 44MiB。
+        """
+        return int(self.data["planner"].get("max_direct_request_bytes")
+                   or 44 * 1024 * 1024)
+
+    @property
+    def qa_min_valid_fraction(self) -> float:
+        """QA 内容检查：非零像元占比下限（P1-6，低于视为异常如全 0 输出）。"""
+        return float(self.data["qa"].get("min_valid_fraction") or 0.01)
 
     @property
     def network_timeout(self) -> int:

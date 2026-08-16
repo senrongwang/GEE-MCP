@@ -82,3 +82,27 @@ class TestRequestValidation:
         plain = _req().validate().to_plain()
         assert "stack_periods" in plain
         assert plain["stack_periods"] is False
+
+
+class TestDtypeParam:
+    """P2-10：输出 dtype 参数校验与别名归一化。"""
+
+    def test_default_auto(self):
+        r = _req().validate()
+        assert r.dtype == "auto"
+        assert r.to_plain()["dtype"] == "auto"
+
+    def test_valid_dtype_normalized(self):
+        assert _req(dtype="float32").validate().dtype == "float32"
+        assert _req(dtype="int16").validate().dtype == "int16"
+        # 别名归一化
+        assert _req(dtype="double").validate().dtype == "float64"
+        assert _req(dtype="short").validate().dtype == "int16"
+        assert _req(dtype="byte").validate().dtype == "uint8"
+        assert _req(dtype="FLOAT32").validate().dtype == "float32"
+
+    def test_invalid_dtype_raises(self):
+        with pytest.raises(RequestValidationError):
+            _req(dtype="complex128").validate()
+        with pytest.raises(RequestValidationError):
+            _req(dtype="rgb").validate()

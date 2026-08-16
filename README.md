@@ -195,8 +195,11 @@ tests/                单元测试
 | **auto（默认）** | **始终 Direct Download 本地直下**：`Image.getDownloadURL()` 逐 band 下载，外包矩形过大时自动分片拼接，**全程不经 Google Drive** |
 | `strategy="export"` | 仅当你**显式指定**时才使用 `ee.batch.Export.image.toDrive()`（远程中转 → Drive → 本地回传） |
 
-- 单块直下上限保守取 30MB；外包矩形网格过大时自动按矩形分片（每块 ≤ 800 万像元），下载后本地 rasterio 拼接。
-- 分片数超过 `planner.max_direct_tiles`（默认 1000）时报错并建议缩小范围，避免打爆 GEE 请求配额；**不会自动退回 Export**。
+- 分块按**请求字节预算**切分（`planner.max_direct_request_bytes`，默认 44MiB）：GEE 按 float64 8B/px 计算请求大小（上限 48MiB），分块像素 ≈ 预算 ÷ 8，**不再写死 800 万像元**（8M×8B=64MB 会超限）。
+- dry_run 的 `estimated_pixels` 按**目标 CRS 实际网格**估算（Web Mercator 纬度拉伸 ~1.4 倍），与真实下载一致；`warnings` 明确提示「planner 建议 vs 实际策略」的差异与选项。
+- 网格维度 / 分片数超保护上限时：dry_run 返回 `direct_feasible=false` 并给出两个选项（缩小范围 / 显式 `strategy="export"`）；真实提交则 fail-fast，**不再静默执行必败路径**。
+- 分块缓存断点续传：直下分块存到 `{输出}.chunks/`，失败重试只补缺失分块。
+- `strategy="export"` 前置检查 Google Drive 空间，不足且 direct 可行时自动回退本地直下，否则明确报错。
 - 多时相逐景导出有任务数保护（超过 30 景建议用 `time_mode=monthly/annual` 分组）。
 
 ## 时间分组与聚合
@@ -207,11 +210,18 @@ tests/                单元测试
 time_mode:  native | daily | monthly | annual
 aggregation: mean | median | mosaic | first | best | min | max | sum
 stack_periods: false（默认，每时间片一个文件） | true（多时间片合并为一个多波段 tif）
+dtype: auto（保留 GEE 原始 float64） | float32 | float64 | int16 | uint16 | ...
 ```
 
 - `native` + 影像较少 → 逐景下载（本地直下）；
 - 影像较多 → 自动按月 / 按年分组（可配合 `aggregation=mean` 等输出 12 个月平均 / 5 个年文件），避免大量逐景请求。
-- `stack_periods=true`：时间维堆叠——把多个时间片合并为一个多波段 GeoTIFF（波段数=时间片数，每个波段对应一天/一月），文件名如 `2021-01-01-2021-12-31.tif`，波段描述 = `{波段名}_{时间片}`。适合小 tif 合并；大 tif 建议保持默认单波段逐文件。
+- `stack_periods=true`：时间维堆叠——把多个时间片合并为一个多波段 GeoTIFF（波段数=时间片数，每个波段对应一天/一月），文件名如 `2021-01-01-2021-12-31.tif`，波段描述 = `{波段名}_{时间片}`。适合小 tif 合并；大 tif 建议保持默认单波段逐文件。堆叠过程有进度（`gee_task_status` 的 `progress` / `progress_note`）。
+- `dtype=float32`（或 int16 等）：下载后把 float64 输出转换为目标 dtype 并 deflate 压缩，体积可减小数倍（如 1.6GB → ~718MB）。
+
+## QA（内容级检查）
+
+- 元数据检查：CRS / 分辨率 / 尺寸 / 波段数 / 全部波段 dtype / NoData / transform / bounds；
+- **内容检查**：非零像元占比（低于 `qa.min_valid_fraction` 视为异常，如整景全 0 的失败请求）、min/max 值域、全 0 检测；大文件降采样读取，不整读内存。
 
 ## 安全设计
 
@@ -227,8 +237,8 @@ pytest -q          # 纯逻辑单元测试，无需 GEE 凭据
 
 ## Roadmap（见设计文档）
 
-- 已实现：数据集发现（`gee_search_datasets` / `gee_validate_dataset` / `gee_catalog_update` + `gee_search` prompt）、时间维堆叠（`stack_periods=true` 多波段合并）
-- 第二阶段：月度/年度聚合、自动任务分批、Cloud Storage、断点续传、重试、下载缓存、数据集对比（`gee_compare_datasets`）、预览（`gee_preview_dataset`）
+- 已实现：数据集发现（`gee_search_datasets` / `gee_validate_dataset` / `gee_catalog_update` + `gee_search` prompt）、时间维堆叠（`stack_periods=true` 多波段合并）、分块缓存断点续传（P1-5）、网格对齐拼接（P1-4）、QA 内容级检查（P1-6）、输出 dtype 转换（P2-10）、任务进度（P2-7）、dry_run 意图 vs 推荐提示（P2-8）、Export 前置 Drive 空间检查与回退（P2-9）
+- 第二阶段：月度/年度聚合、自动任务分批、Cloud Storage、重试、数据集对比（`gee_compare_datasets`）、预览（`gee_preview_dataset`）
 - 第三阶段：语义搜索（Embedding + 向量库）、AI Remote Sensing Data Acquisition Agent（多源数据同网格预处理 + dataset manifest）
 
 ## License

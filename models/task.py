@@ -40,6 +40,7 @@ class TaskRecord:
     gee_state: Optional[str] = None
     strategy: Optional[str] = None
     progress: Optional[float] = None
+    progress_note: Optional[str] = None
     error: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -126,6 +127,7 @@ class TaskStore:
             gee_state=data.get("gee_state"),
             strategy=data.get("strategy"),
             progress=data.get("progress"),
+            progress_note=data.get("progress_note"),
             error=data.get("error"),
             files=data.get("files", []),
             plan=data.get("plan", {}),

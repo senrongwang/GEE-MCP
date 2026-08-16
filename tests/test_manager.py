@@ -33,7 +33,7 @@ class TestManagerNoGEE:
     """不触发 GEE 调用的管理器行为。"""
 
     def test_local_first_strategy(self, tmp_path):
-        """默认策略：即使分片很多 / 影像很多，也永不自动 Export（本地优先）。"""
+        """默认策略：本地直下；网格/分片超限时报 feasible=False（P0-3 统一决策链）。"""
         from download.manager import DownloadManager
         from planner.download_planner import STRATEGY_DIRECT, STRATEGY_EXPORT
         from models.request import DownloadRequest
@@ -47,9 +47,13 @@ class TestManagerNoGEE:
             boundary="projects/x/assets/CUS",
             output=str(tmp_path),
         )
-        # auto / direct：始终本地直下
-        assert manager._decide_strategy(req, 100, 500, 99999, 20000) == STRATEGY_DIRECT
-        assert manager._decide_strategy(req, 3, 1, 1, 10) == STRATEGY_DIRECT
+        # auto / direct：始终本地直下；规模在阈值内 -> feasible
+        strategy, info = manager._decide_strategy(req, 100, 500, 99999, 5000)
+        assert strategy == STRATEGY_DIRECT
+        assert info["feasible"] is True
+        strategy, info = manager._decide_strategy(req, 3, 1, 1, 10)
+        assert strategy == STRATEGY_DIRECT
+        assert info["feasible"] is True
         # 显式 export：才走远程
         req2 = DownloadRequest(
             dataset="MODIS/061/MOD13A2",
@@ -59,7 +63,50 @@ class TestManagerNoGEE:
             output=str(tmp_path),
             strategy="export",
         )
-        assert manager._decide_strategy(req2, 1, 1, 1, 1) == STRATEGY_EXPORT
+        assert manager._decide_strategy(req2, 1, 1, 1, 1)[0] == STRATEGY_EXPORT
+
+    def test_direct_infeasible_reported(self, tmp_path):
+        """网格维度 / 分片数超限时：direct 判定必失败并给出原因（P0-3）。"""
+        from download.manager import DownloadManager
+        from planner.download_planner import STRATEGY_DIRECT
+        cfg = Config.load()
+        cfg.data["filesystem"]["default_output"] = str(tmp_path)
+        manager = DownloadManager(cfg)
+        req = DownloadRequest(
+            dataset="MODIS/061/MOD13A2",
+            start_date="2021-01-01",
+            end_date="2021-12-31",
+            boundary="projects/x/assets/CUS",
+            output=str(tmp_path),
+        )
+        # 分片数超保护上限
+        strategy, info = manager._decide_strategy(
+            req, 1, cfg.max_direct_tiles + 1, 1, 10)
+        assert strategy == STRATEGY_DIRECT
+        assert info["feasible"] is False
+        assert "分片数" in info["reason"]
+        # 网格维度超上限
+        strategy, info = manager._decide_strategy(
+            req, 1, 1, 1, cfg.max_grid_dimension + 1)
+        assert strategy == STRATEGY_DIRECT
+        assert info["feasible"] is False
+        assert "网格维度" in info["reason"]
+
+    def test_set_progress(self, tmp_path):
+        """_set_progress：写入 progress / progress_note 并持久化（P2-7）。"""
+        from download.manager import DownloadManager
+        cfg = Config.load()
+        cfg.data["filesystem"]["default_output"] = str(tmp_path)
+        manager = DownloadManager(cfg)
+        record = TaskRecord(description="t")
+        manager._set_progress(record, 0.5, "下载 3/6 个时间片")
+        assert record.progress == 0.5
+        assert record.progress_note == "下载 3/6 个时间片"
+        loaded = manager.store.load(record.task_id)
+        assert loaded.progress == 0.5
+        assert loaded.progress_note == "下载 3/6 个时间片"
+        # record=None（测试直调）不报错
+        manager._set_progress(None, 0.9)
 
     def test_submit_rejects_invalid(self, tmp_path):
         from download.manager import DownloadManager

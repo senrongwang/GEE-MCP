@@ -56,6 +56,63 @@ class TestValidation:
         assert "EPSG:4326" in crs_check["detail"]
 
 
+def _write_array(path, arr, transform=None):
+    with rasterio.open(
+        str(path), "w", driver="GTiff",
+        height=arr.shape[1], width=arr.shape[2], count=arr.shape[0],
+        dtype=str(arr.dtype), crs="EPSG:3857",
+        transform=transform or from_origin(0, 100000, 1000, 1000),
+        nodata=-9999.0,
+    ) as dst:
+        dst.write(arr)
+    return path
+
+
+class TestContentChecks:
+    """P1-6：QA 只查元数据不够——增加内容级检查（非零占比 / 全 0 检测）。"""
+
+    def test_all_zero_fails(self, tmp_path):
+        """某天请求失败返回全 0 时，QA 必须拦截（此前会"通过"）。"""
+        arr = np.zeros((1, 10, 10), dtype=np.float32)
+        p = _write_array(tmp_path / "zero.tif", arr)
+        report = validate_file(p)
+        assert report.passed is False
+        content = next(c for c in report.checks if c["check"] == "content")
+        assert content["ok"] is False
+        assert "全 0" in content["detail"]
+
+    def test_valid_fraction_below_floor_fails(self, tmp_path):
+        """非零像元占比低于 min_valid_fraction -> 失败。"""
+        arr = np.zeros((1, 10, 10), dtype=np.float32)
+        arr[0, 0, 0] = 1.0  # 仅 1% 非零
+        p = _write_array(tmp_path / "low.tif", arr)
+        report = validate_file(p, min_valid_fraction=0.5)
+        assert report.passed is False
+
+    def test_low_valid_fraction_ok_with_default_floor(self, tmp_path):
+        """海洋/掩膜场景（27~35% 有效）在默认下限 1% 下通过。"""
+        arr = np.zeros((1, 10, 10), dtype=np.float32)
+        arr[0, 0, 0] = 1.0
+        p = _write_array(tmp_path / "masked.tif", arr)
+        assert validate_file(p).passed is True
+
+    def test_content_check_skippable(self, tmp_path):
+        arr = np.zeros((1, 10, 10), dtype=np.float32)
+        p = _write_array(tmp_path / "skip.tif", arr)
+        report = validate_file(p, check_content=False)
+        assert report.passed is True  # 跳过内容检查后全 0 不再判失败
+
+    def test_mixed_nodata_and_values(self, tmp_path):
+        """部分 nodata + 部分有效值：内容检查通过。"""
+        arr = np.full((1, 10, 10), -9999.0, dtype=np.float32)
+        arr[0, :5, :] = 0.3  # 一半有效
+        p = _write_array(tmp_path / "mix.tif", arr)
+        report = validate_file(p)
+        assert report.passed is True
+        content = next(c for c in report.checks if c["check"] == "content")
+        assert "非零像元" in content["detail"]
+
+
 class TestMetadata:
     def test_write_metadata(self, tmp_path, sample_tif):
         meta_path = write_metadata(

@@ -12,7 +12,7 @@ from typing import Optional
 import ee
 
 from config import Config
-from planner.size_estimator import SizeEstimate, estimate_raster_size
+from planner.size_estimator import SizeEstimate, estimate_raster_size_grid
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -43,7 +43,7 @@ class DownloadPlanner:
     """根据估算规模决定 direct / export。
 
     阈值（保守，见设计文档第 38 节）：
-    - direct_download_max_mb：默认 20 MB（GEE 上限 32 MB）
+    - direct_download_max_mb：默认 20 MB（分块请求上限按 float64 计约 48MiB，P0-1）
     - max_grid_dimension：默认 9000（GEE 上限 10000）
     """
 
@@ -55,18 +55,23 @@ class DownloadPlanner:
         region: ee.Geometry,
         scale: int,
         band_count: int = 1,
-        dtype: str = "FLOAT32",
+        dtype: str = "FLOAT64",
         image_count: int = 1,
         forced: str = "auto",
+        crs: str = "EPSG:3857",
     ) -> PlanResult:
-        """决策入口。forced: auto / direct / export。"""
+        """决策入口。forced: auto / direct / export。
+
+        P0-2：估算按目标 CRS 下的实际网格（Web Mercator 纬度拉伸 ~1/cos(φ)），
+        不再用 geodesic 球面面积；P0-1：按 float64（8B/px）计字节，与 GEE
+        getDownloadURL 的实际请求大小一致。
+        """
         if forced == STRATEGY_DIRECT:
             return PlanResult(STRATEGY_DIRECT, "用户指定直接下载")
         if forced == STRATEGY_EXPORT:
             return PlanResult(STRATEGY_EXPORT, "用户指定 Export Task")
 
-        area = _region_area(region)
-        est = estimate_raster_size(area, scale, band_count, dtype)
+        est = estimate_raster_size_grid(region, scale, band_count, dtype, crs)
 
         # 多时相：超过阈值影像数强制 Export（避免创建大量直接下载）
         if image_count > self.config.export_force_threshold:
@@ -96,10 +101,3 @@ class DownloadPlanner:
             f"估算 {est.mb_total:.1f} MB / 网格 {est.grid_dimension}，在安全阈值内，直接下载",
             est,
         )
-
-
-def _region_area(region: ee.Geometry) -> float:
-    try:
-        return float(region.area(1).getInfo())
-    except Exception:  # noqa: BLE001
-        return 0.0

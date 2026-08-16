@@ -21,14 +21,22 @@ filesystem:
     - "D:/GEE_Data"
 
 planner:
-  # Direct Download 阈值（保守设置，不要卡在 GEE API 上限 32MB）
+  # Direct Download 单文件阈值（估算超过则建议 Export；GEE 分块请求上限 48MiB）
   direct_download_max_mb: 30
   # 最大 grid dimension（GEE 限制 10000，保守设置）
   max_grid_dimension: 9000
   # 本地直下分片数保护上限（默认永不自动 Export；分片超过此数时报错，请缩小范围）
   max_direct_tiles: 1000
+  # 单次 getDownloadURL 请求字节预算（P0-1；GEE 实际上限 50331648 字节=48MiB，
+  # 且按 float64 8B/px 计算请求大小；分块像素 = 预算 ÷ 8）
+  max_direct_request_bytes: 46137344
   # 仅当用户显式 strategy="export" 时使用 Export Task（远程中转，默认不用）
   export_force_threshold: 3
+
+qa:
+  # QA 内容级检查（P1-6）：非零像元占比下限；低于视为异常（如整景全 0）。
+  # 海洋/掩膜较多的数据正常占比约 27~35%，请勿设过高。
+  min_valid_fraction: 0.01
 
 network:
   timeout: 300
