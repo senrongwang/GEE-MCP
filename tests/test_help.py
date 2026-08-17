@@ -2,6 +2,8 @@
 
 from server import _DOWNLOAD_REQUIRED_PARAMS, _HELP_DOC
 
+_REQUIRED_KEYS = ["dataset", "start_date", "end_date", "边界（boundary / bbox / geometry 三选一）"]
+
 
 class TestHelpDoc:
     def test_overview_contains_required_and_optional(self):
@@ -9,10 +11,14 @@ class TestHelpDoc:
         assert "gee_download 必选参数" in doc
         assert "gee_download 可选参数" in doc
         required = doc["gee_download 必选参数"]
-        assert set(required) == {"dataset", "start_date", "end_date", "boundary"}
+        assert set(required) == set(_REQUIRED_KEYS)
         assert "output" in doc["gee_download 可选参数"]
         assert "dry_run" in doc["gee_download 可选参数"]
         assert "bands" in doc["gee_download 可选参数"]
+        # 新增：bbox / geometry 也在可选参数与边界说明中
+        assert "bbox" in doc["gee_download 可选参数"]
+        assert "geometry" in doc["gee_download 可选参数"]
+        assert "bbox" in required["边界（boundary / bbox / geometry 三选一）"]
 
     def test_topics(self):
         assert "调用流程" in _HELP_DOC("workflow")
@@ -48,14 +54,15 @@ class TestHelpDoc:
         assert "gee_download 必选参数" in doc
 
     def test_required_params_constant(self):
-        assert list(_DOWNLOAD_REQUIRED_PARAMS) == ["dataset", "start_date", "end_date", "boundary"]
+        assert list(_DOWNLOAD_REQUIRED_PARAMS) == _REQUIRED_KEYS
 
 
 class TestValidationAdvice:
     def test_advice_mentions_required_and_help(self):
         # 与 server.py 中校验失败时的提示保持一致
         advice = (
-            "gee_download 必选参数：dataset / start_date / end_date / boundary；"
+            "gee_download 必选参数：dataset / start_date / end_date / "
+            "边界（boundary|bbox|geometry 三选一）；"
             "常用可选参数：output / scale / crs / bands / dry_run。\n"
             f"必选参数说明：{'；'.join(f'{k}（{v}）' for k, v in _DOWNLOAD_REQUIRED_PARAMS.items())}。\n"
             "可调用 gee_help(topic='download') 查看完整说明。"

@@ -2,7 +2,7 @@
 
 AI 原生的 **Google Earth Engine（GEE）遥感数据下载与任务管理工具**，以 **本地 MCP Server** 形态提供，可被 ChatGPT / Codex / Claude 等 AI Agent 调用。
 
-用户只需告诉 AI：数据集 ID、时间范围、分辨率、Boundary Asset、输出目录、坐标系 —— 系统自动完成登录检查、数据集识别、时间筛选、边界解析、下载策略规划（默认本地直下，必要时自动分片）、执行下载、GeoTIFF QA 与元数据生成。
+用户只需告诉 AI：数据集 ID、时间范围、分辨率、边界（Boundary Asset / bbox 坐标矩形 / GeoJSON，三选一）、输出目录、坐标系 —— 系统自动完成登录检查、数据集识别、时间筛选、边界解析、下载策略规划（默认本地直下，必要时自动分片）、执行下载、GeoTIFF QA 与元数据生成。
 
 > 设计文档见 [AI_GEE_下载器整体设计方案.md](./AI_GEE_下载器整体设计方案.md)。
 >
@@ -66,7 +66,7 @@ python -m earthengine authenticate
 |---|---|
 | `gee_login` | 登录 / 检查认证状态 / 初始化 |
 | `gee_dataset_info` | 数据集信息（类型 / 波段 / CRS / 分辨率 / 时间范围） |
-| `gee_boundary_info` | Boundary Asset 检查（要素数 / 范围 / 面积） |
+| `gee_boundary_info` | 边界检查（Asset / bbox / GeoJSON 三选一：要素数 / 范围 / 面积） |
 | `gee_search_datasets` | **搜索 GEE 数据集**（本地 Catalog：关键词 / Band / 分辨率 / 时间分辨率 / 时间范围 / 平台 / 区域，无需登录） |
 | `gee_validate_dataset` | **验证数据集**（用当前账号：类型 / 真实 Band / 可访问性，结果缓存 1 小时） |
 | `gee_catalog_update` | **更新本地数据集目录**（官方 GEE STAC 抓取 → SQLite + FTS5；支持 `seed=true` 离线演示） |
@@ -173,6 +173,23 @@ gee_download(
 ```
 
 系统自动规划 → 提交任务 → 返回 `task_id` → AI 轮询 `gee_task_status` → 完成后返回文件清单、QA 报告与 metadata.json 路径。
+
+> 边界不必是 Asset：也可以直接传坐标矩形或 GeoJSON（`boundary` / `bbox` / `geometry` 三选一）。
+
+> 用户：下载北京周边 MODIS EVI，2021 年 7 月，1 km，范围 116°E–118°E、39°N–41°N，按月平均。
+
+```text
+gee_download(
+  dataset="MODIS/061/MOD13A2",
+  start_date="2021-07-01",
+  end_date="2021-07-31",
+  bbox=[116.0, 39.0, 118.0, 41.0],   # [west, south, east, north]，EPSG:4326
+  scale="1km", bands=["EVI"],
+  time_mode="monthly", aggregation="mean",
+  output="D:/GEE_Data",
+  dry_run=false
+)
+```
 
 > 大数据量务必先用 `dry_run=true`：返回影像数、估算体积、推荐策略（逐景 / 按月 / 按年分组）与预计任务数，征询用户后再执行。
 

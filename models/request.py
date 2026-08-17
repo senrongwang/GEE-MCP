@@ -7,6 +7,7 @@ from datetime import date
 from typing import Optional
 
 from utils.dates import DateRangeError, parse_scale, validate_date_range
+from utils.geo import GeoValidationError, normalize_bbox
 
 # 合法时间模式（设计文档第 12 节）
 TIME_MODES = ("native", "daily", "monthly", "annual")
@@ -48,7 +49,13 @@ class DownloadRequest:
     dataset: str
     start_date: str
     end_date: str
-    boundary: str
+    # 边界三选一（见 gee/boundary.py）：
+    #   boundary: Boundary Asset ID（projects/xxx/assets/xxx 或 users/xxx/xxx）
+    #   bbox:     [west, south, east, north]，EPSG:4326 经纬度
+    #   geometry: GeoJSON Polygon / MultiPolygon / GeometryCollection
+    boundary: Optional[str] = None
+    bbox: Optional[list] = None
+    geometry: Optional[dict] = None
     scale: str | int = 1000
     crs: str = "EPSG:3857"
     output: str = ""
@@ -84,8 +91,40 @@ class DownloadRequest:
         """校验并规范化参数。"""
         if not self.dataset or not str(self.dataset).strip():
             raise RequestValidationError("dataset 不能为空")
-        if not self.boundary or not str(self.boundary).strip():
-            raise RequestValidationError("boundary（Boundary Asset ID）不能为空")
+
+        # 边界三选一：boundary（Asset ID）/ bbox（经纬度矩形）/ geometry（GeoJSON）
+        if isinstance(self.boundary, str):
+            self.boundary = self.boundary.strip()
+
+        def _provided(v) -> bool:
+            """None 与空字符串视为未提供。"""
+            return v is not None and (not isinstance(v, str) or v.strip() != "")
+
+        provided = [k for k, v in
+                    (("boundary", self.boundary), ("bbox", self.bbox),
+                     ("geometry", self.geometry)) if _provided(v)]
+        if not provided:
+            raise RequestValidationError(
+                "边界必须三选一：boundary（Boundary Asset ID，如 projects/xxx/assets/CUS）/ "
+                "bbox（[west,south,east,north] 经纬度，EPSG:4326）/ "
+                "geometry（GeoJSON Polygon/MultiPolygon）"
+            )
+        if len(provided) > 1:
+            raise RequestValidationError(
+                f"boundary / bbox / geometry 只能提供一种边界（当前同时提供了 {len(provided)} 种: {provided}）"
+            )
+        if self.bbox is not None:
+            try:
+                self.bbox = normalize_bbox(self.bbox)
+            except GeoValidationError as exc:
+                raise RequestValidationError(str(exc)) from exc
+        if self.geometry is not None:
+            from utils.geo import supported_geometry_type
+            if supported_geometry_type(self.geometry) is None:
+                raise RequestValidationError(
+                    "geometry 必须是 GeoJSON 对象且类型为 Polygon / MultiPolygon / "
+                    "GeometryCollection（Point/LineString 不支持作下载边界）"
+                )
 
         try:
             self.date_start, self.date_end = validate_date_range(self.start_date, self.end_date)
@@ -161,6 +200,8 @@ class DownloadRequest:
             "start_date": self.start_date,
             "end_date": self.end_date,
             "boundary": self.boundary,
+            "bbox": self.bbox,
+            "geometry": self.geometry,
             "scale": self.scale_m,
             "crs": self.crs,
             "output": self.output,

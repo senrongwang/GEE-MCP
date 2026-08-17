@@ -71,8 +71,8 @@ class DownloadManager:
         resolver = DatasetResolver()
         dsinfo = resolver.inspect(request.dataset)
         bres = BoundaryResolver()
-        fc, binfo = bres.resolve(request.boundary)
-        region = fc.geometry()
+        region, binfo = bres.resolve_any(
+            boundary=request.boundary, bbox=request.bbox, geometry=request.geometry)
 
         images = []
         coll = None
@@ -172,7 +172,8 @@ class DownloadManager:
             "type": dsinfo.type,
             "image_count": count,
             "region": "User Boundary",
-            "boundary": request.boundary,
+            "boundary": binfo.asset_id,
+            "boundary_type": binfo.source_type,
             "boundary_info": binfo.to_dict(),
             "resolution_m": request.scale_m,
             "crs": request.crs,
@@ -374,7 +375,7 @@ class DownloadManager:
                 dataset=request.dataset,
                 start_date=request.start_date,
                 end_date=request.end_date,
-                boundary=request.boundary,
+                boundary=plan.get("boundary") or request.boundary or "",
                 crs=request.crs,
                 scale=request.scale_m,
                 fmt=request.format,
@@ -415,8 +416,8 @@ class DownloadManager:
         resolver = DatasetResolver()
         dsinfo = resolver.inspect(request.dataset)
         bres = BoundaryResolver()
-        fc, binfo = bres.resolve(request.boundary)
-        region = fc.geometry()
+        region, binfo = bres.resolve_any(
+            boundary=request.boundary, bbox=request.bbox, geometry=request.geometry)
 
         base_dir = Path(request.output)
         dataset_dir = self._dataset_dir(request)

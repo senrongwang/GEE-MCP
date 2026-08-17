@@ -36,6 +36,66 @@ class TestRequestValidation:
         with pytest.raises(RequestValidationError):
             _req(boundary="").validate()
 
+    def test_missing_all_boundary_forms(self):
+        with pytest.raises(RequestValidationError):
+            _req(boundary=None, bbox=None, geometry=None).validate()
+
+    def test_bbox_valid(self):
+        r = _req(boundary=None, bbox=[116.0, 39.0, 118.0, 41.0]).validate()
+        assert r.bbox == [116.0, 39.0, 118.0, 41.0]
+        assert r.boundary is None
+        assert r.to_plain()["bbox"] == [116.0, 39.0, 118.0, 41.0]
+
+    def test_bbox_strings_normalized(self):
+        r = _req(boundary=None, bbox=["116", "39", "118", "41"]).validate()
+        assert r.bbox == [116.0, 39.0, 118.0, 41.0]
+
+    def test_bbox_wrong_length(self):
+        with pytest.raises(RequestValidationError):
+            _req(boundary=None, bbox=[116.0, 39.0, 118.0]).validate()
+
+    def test_bbox_inverted(self):
+        with pytest.raises(RequestValidationError):
+            _req(boundary=None, bbox=[118.0, 41.0, 116.0, 39.0]).validate()
+
+    def test_bbox_out_of_range(self):
+        with pytest.raises(RequestValidationError):
+            _req(boundary=None, bbox=[116.0, -95.0, 118.0, 41.0]).validate()
+
+    def test_bbox_non_numeric(self):
+        with pytest.raises(RequestValidationError):
+            _req(boundary=None, bbox=[116.0, "north", 118.0, 41.0]).validate()
+
+    def test_geometry_valid_polygon(self):
+        gj = {"type": "Polygon",
+              "coordinates": [[[116, 39], [118, 39], [118, 41], [116, 41], [116, 39]]]}
+        r = _req(boundary=None, geometry=gj).validate()
+        assert r.geometry == gj
+        assert r.to_plain()["geometry"] == gj
+
+    def test_geometry_multipolygon_valid(self):
+        gj = {"type": "MultiPolygon",
+              "coordinates": [[[[116, 39], [117, 39], [117, 40], [116, 40], [116, 39]]]]}
+        r = _req(boundary=None, geometry=gj).validate()
+        assert r.geometry == gj
+
+    def test_geometry_unsupported_type(self):
+        with pytest.raises(RequestValidationError):
+            _req(boundary=None, geometry={"type": "Point", "coordinates": [116, 39]}).validate()
+
+    def test_geometry_not_dict(self):
+        with pytest.raises(RequestValidationError):
+            _req(boundary=None, geometry="POLYGON((...))").validate()
+
+    def test_multiple_boundary_forms_rejected(self):
+        with pytest.raises(RequestValidationError):
+            _req(bbox=[116.0, 39.0, 118.0, 41.0]).validate()
+        with pytest.raises(RequestValidationError):
+            _req(bbox=[116.0, 39.0, 118.0, 41.0],
+                 geometry={"type": "Polygon",
+                           "coordinates": [[[116, 39], [118, 39], [118, 41], [116, 41], [116, 39]]]}
+                 ).validate()
+
     def test_bad_dates(self):
         with pytest.raises(RequestValidationError):
             _req(start_date="2021-12-31", end_date="2021-01-01").validate()

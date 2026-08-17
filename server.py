@@ -46,13 +46,14 @@ mcp = MCPServer(
         "（无需登录；支持关键词 / Band / 分辨率 / 时间分辨率 / 时间范围 / 平台 / 区域 / 排序）；"
         "候选结果用 gee_validate_dataset 验证（需先 gee_login），Catalog 过期可 gee_catalog_update 刷新。\n"
         "【gee_download 必选参数】dataset（数据集 ID）、start_date（YYYY-MM-DD）、"
-        "end_date（YYYY-MM-DD）、boundary（Boundary Asset ID）。\n"
+        "end_date（YYYY-MM-DD）、边界（三选一）：boundary（Boundary Asset ID）或 "
+        "bbox（[west,south,east,north] 经纬度）或 geometry（GeoJSON Polygon/MultiPolygon）。\n"
         "【可选参数】output（默认 D:/GEE_Data，建议显式指定）、scale（默认 1000m，支持 '1km'/'250m'）、"
         "crs（默认 EPSG:3857）、bands（如 [\"EVI\"]，默认全部）、time_mode（native/daily/monthly/annual）、"
         "aggregation（mean/median/mosaic/first/best/min/max/sum）、dry_run（大任务必须先用 true 预览）、"
         "strategy（auto=本地直下）、dtype（float32/int16 等，缩小体积）、clip、description。\n"
         "【调用流程】1) 首次先 gee_login；2) 用 gee_dataset_info 确认数据集与波段；"
-        "3) 用 gee_boundary_info 确认边界；4) 大规模下载先 gee_download(dry_run=true) 征询用户；"
+        "3) 用 gee_boundary_info 确认边界（Asset / bbox / GeoJSON 均可）；4) 大规模下载先 gee_download(dry_run=true) 征询用户；"
         "5) 提交后用 gee_task_status 轮询，gee_list_tasks 查看历史。\n"
         "【提醒】参数不确定时先调用 gee_help 查看完整说明。"
     ),
@@ -63,7 +64,11 @@ _DOWNLOAD_REQUIRED_PARAMS = {
     "dataset": "GEE 数据集 ID，如 MODIS/061/MOD13A2",
     "start_date": "开始日期，YYYY-MM-DD",
     "end_date": "结束日期，YYYY-MM-DD",
-    "boundary": "Boundary Asset ID，如 projects/xxx/assets/CUS",
+    "边界（boundary / bbox / geometry 三选一）": (
+        "boundary=Boundary Asset ID（如 projects/xxx/assets/CUS），或 "
+        "bbox=[west,south,east,north]（EPSG:4326 经纬度），或 "
+        "geometry=GeoJSON（Polygon/MultiPolygon）"
+    ),
 }
 
 # 全局单例
@@ -263,22 +268,33 @@ def _gee_search_prompt() -> str:
 
 
 @mcp.tool()
-def gee_boundary_info(asset_id: str) -> dict:
-    """检查 Boundary Asset：要素数量、范围、面积。
+def gee_boundary_info(asset_id: Optional[str] = None, bbox: Optional[list] = None,
+                      geometry: Optional[dict] = None) -> dict:
+    """检查边界：要素数量、范围、面积。
+
+    边界三选一：
+    - asset_id: 边界资产 ID，如 projects/xxx/assets/Anhui 或 users/xxx/Anhui
+    - bbox: 坐标矩形 [west, south, east, north]（EPSG:4326 经纬度），无需 Asset
+    - geometry: GeoJSON Polygon / MultiPolygon，无需 Asset
 
     Args:
-        asset_id: 边界资产 ID，如 projects/xxx/assets/Anhui 或 users/xxx/Anhui
+        asset_id: 边界资产 ID（与 bbox / geometry 三选一）
+        bbox: 矩形边界 [west, south, east, north]（EPSG:4326 经纬度）
+        geometry: GeoJSON 几何（Polygon / MultiPolygon / GeometryCollection）
     """
     try:
         from gee.auth import ensure_initialized
         ensure_initialized(_get_config())
-        _, info = BoundaryResolver().resolve(asset_id)
+        _, info = BoundaryResolver().resolve_any(
+            boundary=asset_id, bbox=bbox, geometry=geometry)
         return {"status": "ok", **info.to_dict()}
     except GeeAuthError as exc:
         return _auth_err(exc)
     except BoundaryError as exc:
-        return _err("Boundary Asset not found", "边界资产无法访问", str(exc),
-                    "1. 检查 Asset 是否属于当前账号。\n2. 检查 Asset sharing 权限。\n3. 用正确的 projects/ 或 users/ 前缀。")
+        return _err("Boundary invalid", "边界无法解析", str(exc),
+                    "边界三选一：1. asset_id（Boundary Asset，需属于当前账号且有权限）；"
+                    "2. bbox=[west,south,east,north]（EPSG:4326 经纬度）；"
+                    "3. geometry=GeoJSON（Polygon/MultiPolygon）。")
     except Exception as exc:  # noqa: BLE001
         return _err("boundary info failed", "获取边界信息失败", str(exc), "确认已登录（gee_login）。")
 
@@ -304,11 +320,11 @@ def _HELP_DOC(topic: Optional[str] = None) -> dict:
         "工具清单": {
             "gee_login": "登录 GEE / 检查认证状态 / 初始化（参数：force 可选）",
             "gee_dataset_info": "获取数据集信息（参数：dataset_id 必选）",
-            "gee_boundary_info": "检查 Boundary Asset（参数：asset_id 必选）",
+            "gee_boundary_info": "检查边界（asset_id=Asset / bbox=[西,南,东,北] / geometry=GeoJSON 三选一）",
             "gee_search_datasets": "搜索 GEE 数据集（本地 Catalog，无需登录；query/bands/分辨率/时间/平台/区域）",
             "gee_validate_dataset": "用当前账号验证数据集（参数：dataset_id 必选）",
             "gee_catalog_update": "更新本地数据集目录（参数：force/limit/seed 可选）",
-            "gee_download": "核心下载（4 个必选参数 + 13 个可选参数）",
+            "gee_download": "核心下载（必选：dataset / start_date / end_date / 边界三选一 + 可选参数）",
             "gee_task_status": "查询任务状态（参数：task_id 必选）",
             "gee_list_tasks": "列出本地任务 / GEE 任务（参数：state、source 可选）",
         },
@@ -316,12 +332,18 @@ def _HELP_DOC(topic: Optional[str] = None) -> dict:
             "dataset": "GEE 数据集 ID，如 MODIS/061/MOD13A2",
             "start_date": "开始日期，YYYY-MM-DD",
             "end_date": "结束日期，YYYY-MM-DD",
-            "boundary": "Boundary Asset ID，如 projects/xxx/assets/CUS",
+            "边界（boundary / bbox / geometry 三选一）": (
+                "boundary=Boundary Asset ID（如 projects/xxx/assets/CUS）；或 "
+                "bbox=[west,south,east,north]（EPSG:4326 经纬度，无需 Asset）；或 "
+                "geometry=GeoJSON（Polygon/MultiPolygon，无需 Asset）"
+            ),
         },
         "gee_download 可选参数": {
             "output": "输出目录（默认 D:/GEE_Data，建议显式指定）",
             "scale": "分辨率（默认 1000m；支持 '250m'/'1km'/'9000'）",
             "crs": "坐标系（默认 EPSG:3857）",
+            "bbox": "边界方式之二：矩形 [west, south, east, north]（EPSG:4326 经纬度），与 boundary/geometry 三选一",
+            "geometry": "边界方式之三：GeoJSON 对象（Polygon/MultiPolygon），与 boundary/bbox 三选一",
             "bands": "只下载指定波段，如 [\"EVI\"]（默认全部）",
             "stack_periods": "时间维堆叠：多个时间片合并为一个多波段 tif（波段数=时间片数，每波段=一天/一月）；默认 False=每时间片单独文件",
             "time_mode": "native(逐景)/daily/monthly/annual（默认 native）",
@@ -351,7 +373,7 @@ def _HELP_DOC(topic: Optional[str] = None) -> dict:
         "调用流程": [
             "1. 首次使用先调用 gee_login（浏览器 OAuth，凭据持久化）",
             "2. gee_dataset_info 确认数据集类型（Image / ImageCollection）与波段",
-            "3. gee_boundary_info 确认边界资产可访问",
+            "3. gee_boundary_info 确认边界（asset_id / bbox / geometry 三选一）",
             "4. 下载前询问用户输出方式：默认单波段（每个时间片单独文件，如 ndvi01.tif、ndvi02.tif）；"
             "若用户要多波段合并，用 stack_periods=true 合并为一个多波段 tif（如 ndvi01-02.tif，波段数=时间片数）",
             "5. 大规模下载先用 gee_download(dry_run=true) 预览：影像数 / 估算体积 / 策略 / 任务数，征询用户后再执行",
@@ -373,6 +395,17 @@ def _HELP_DOC(topic: Optional[str] = None) -> dict:
                 "boundary": "projects/xxx/assets/CUS",
                 "scale": "1km",
                 "bands": ["EVI"],
+                "output": "D:/GEE_Data",
+            },
+            "bbox 矩形（无需 Asset）": {
+                "dataset": "MODIS/061/MOD13A2",
+                "start_date": "2021-07-01",
+                "end_date": "2021-07-31",
+                "bbox": [116.0, 39.0, 118.0, 41.0],
+                "scale": "1km",
+                "bands": ["EVI"],
+                "time_mode": "monthly",
+                "aggregation": "mean",
                 "output": "D:/GEE_Data",
             },
             "月平均多时相": {
@@ -435,7 +468,9 @@ def gee_download(
     dataset: str,
     start_date: str,
     end_date: str,
-    boundary: str,
+    boundary: Optional[str] = None,
+    bbox: Optional[list] = None,
+    geometry: Optional[dict] = None,
     scale: str | int = 1000,
     crs: str = "EPSG:3857",
     output: str = "",
@@ -456,7 +491,11 @@ def gee_download(
         dataset: GEE 数据集 ID（Image 或 ImageCollection）
         start_date: 开始日期 YYYY-MM-DD
         end_date: 结束日期 YYYY-MM-DD
-        boundary: Boundary Asset ID（projects/xxx/assets/xxx 或 users/xxx/xxx）
+        boundary: 边界三选一之一 —— Boundary Asset ID（projects/xxx/assets/xxx 或 users/xxx/xxx）
+        bbox: 边界三选一之一 —— 矩形坐标 [west, south, east, north]（EPSG:4326 经纬度），
+            无需预先上传 Asset，如 [116.0, 39.0, 118.0, 41.0]
+        geometry: 边界三选一之一 —— GeoJSON 对象（Polygon / MultiPolygon / GeometryCollection），
+            无需预先上传 Asset，如 {"type": "Polygon", "coordinates": [[[...]]]}
         scale: 分辨率（米），支持 250m / 1km / 9000 等写法
         crs: 输出坐标系，默认 EPSG:3857
         output: 本地输出目录（必须在配置白名单内）
@@ -483,6 +522,8 @@ def gee_download(
         start_date=start_date,
         end_date=end_date,
         boundary=boundary,
+        bbox=bbox,
+        geometry=geometry,
         scale=scale,
         crs=crs,
         output=output or _get_config().default_output,
@@ -501,7 +542,8 @@ def gee_download(
         req.validate()
     except RequestValidationError as exc:
         advice = (
-            "gee_download 必选参数：dataset / start_date / end_date / boundary；"
+            "gee_download 必选参数：dataset / start_date / end_date / "
+            "边界（boundary|bbox|geometry 三选一）；"
             "常用可选参数：output / scale / crs / bands / dry_run。\n"
             f"必选参数说明：{_fmt_required()}。\n"
             "可调用 gee_help(topic='download') 查看完整说明。"
